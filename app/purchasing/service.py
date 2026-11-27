@@ -47,6 +47,9 @@ def _db_keys(d: dict) -> dict:
     return {_KEY_MAP.get(k, k): v for k, v in d.items()}
 
 
+# rows of one purchase list answer; the totals always cover every match (list_with_totals)
+LIST_CAP = 5000
+
 class Purchasing:
     def __init__(self, db: Database, settings: config_mod.Settings | None = None,
                  ai_extract=None):
@@ -130,6 +133,15 @@ class Purchasing:
             accounts.consume_usage(self.db, ctx, "ai_extraction")
         file_id, _ = self._store_file(ctx, data, filename, mime)
         return self._create_from_extraction(ctx, extracted, kind, file_id, supplier_id)
+
+    def duplicate_of(self, ctx: Context, supplier_id: str | None, invoice_no: str | None) -> str | None:
+        """The live invoice already holding this supplier's number, if any (the check update_header makes)."""
+        ctx.require("purchases.create")
+        if not supplier_id or not invoice_no:
+            return None
+        r = self.db.one("SELECT id FROM purchase_invoices WHERE org_id=? AND supplier_id=? AND invoice_no=?"
+                        " AND status<>'cancelled'", (ctx.org_id, supplier_id, invoice_no))
+        return r["id"] if r else None
 
     def create_manual(self, ctx: Context, *, supplier_id: str | None = None) -> str:
         ctx.require("purchases.create")
@@ -458,32 +470,52 @@ class Purchasing:
                 "entry_order": entry_settings.get(self.db, ctx.org_id)["field_order"],
                 "can_approve": inv["status"] == "draft" and not validation.blocking(issues)}
 
-    def list(self, ctx: Context, status: str | None = None, limit: int = 50, date_from: str | None = None,
-             date_to: str | None = None, supplier_id: str | None = None) -> list[dict]:
-        ctx.require("purchases.read")
-        q = ("SELECT pi.id, pi.serial_no, pi.invoice_no, pi.invoice_date, pi.status, pi.source_type,"
-             " pi.declared_total, pi.computed_total, pi.created_at, pi.approved_at, s.name supplier_name,"
-             " (SELECT count(*) FROM purchase_invoice_lines l WHERE l.invoice_id=pi.id) lines"
-             " FROM purchase_invoices pi LEFT JOIN suppliers s ON s.id=pi.supplier_id"
-             " WHERE pi.org_id=?")
-        params: list = [ctx.org_id]
+    def _list_where(self, ctx: Context, status, date_from, date_to, supplier_id) -> tuple[str, list, bool]:
+        where, params = " WHERE pi.org_id=?", [ctx.org_id]
         if status:
-            q += " AND pi.status=?"
+            where += " AND pi.status=?"
             params.append(status)
         if supplier_id:
-            q += " AND pi.supplier_id=?"
+            where += " AND pi.supplier_id=?"
             params.append(supplier_id)
+        dated = False
         if date_from and date_to and status != "draft":      # open drafts always show, whatever their date
             try:
                 d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
             except ValueError:
                 raise ValidationFailed("التاريخ غير صحيح")
-            q += " AND coalesce(pi.invoice_date, substr(pi.created_at,1,10)) BETWEEN ? AND ?"
+            where += " AND coalesce(pi.invoice_date, substr(pi.created_at,1,10)) BETWEEN ? AND ?"
             params += [d1.isoformat(), d2.isoformat()]
-            limit = 5000
+            dated = True
+        return where, params, dated
+
+    def list(self, ctx: Context, status: str | None = None, limit: int = 50, date_from: str | None = None,
+             date_to: str | None = None, supplier_id: str | None = None) -> list[dict]:
+        ctx.require("purchases.read")
+        where, params, dated = self._list_where(ctx, status, date_from, date_to, supplier_id)
+        q = ("SELECT pi.id, pi.serial_no, pi.invoice_no, pi.invoice_date, pi.status, pi.source_type,"
+             " pi.declared_total, pi.computed_total, pi.created_at, pi.approved_at, s.name supplier_name,"
+             " (SELECT count(*) FROM purchase_invoice_lines l WHERE l.invoice_id=pi.id) lines"
+             " FROM purchase_invoices pi LEFT JOIN suppliers s ON s.id=pi.supplier_id" + where)
+        if dated:
+            limit = LIST_CAP
         q += " ORDER BY coalesce(pi.invoice_date, substr(pi.created_at,1,10)) DESC, pi.created_at DESC LIMIT ?"
-        params.append(min(limit, 5000))
+        params.append(min(limit, LIST_CAP))
         return [dict(r) for r in self.db.all(q, tuple(params))]
+
+    def list_with_totals(self, ctx: Context, status: str | None = None, date_from: str | None = None,
+                         date_to: str | None = None, supplier_id: str | None = None) -> dict:
+        """The list (up to LIST_CAP rows) and the totals of EVERY matching invoice (QA-29, like #479 for sales):
+        the screen added up only the rows it got, so a period past the cap showed a short total silently.
+        An approved invoice counts with what was posted (computed), as the screen does."""
+        rows = self.list(ctx, status, date_from=date_from, date_to=date_to, supplier_id=supplier_id)
+        where, params, _ = self._list_where(ctx, status, date_from, date_to, supplier_id)
+        t = self.db.one(
+            "SELECT count(*) n, sum(pi.status='approved') na,"
+            " sum(CASE WHEN pi.status='approved' THEN coalesce(pi.computed_total, pi.declared_total, 0) END) total"
+            " FROM purchase_invoices pi" + where, tuple(params))
+        totals = {"count": t["n"], "approved_count": t["na"] or 0, "approved_total": t["total"] or 0}
+        return {"rows": rows, "totals": totals, "capped": t["n"] > len(rows)}
 
     # ------------------------------------------------------------ edit
     def _draft_for_update(self, ctx: Context, inv_id: str, version: int | None) -> dict:

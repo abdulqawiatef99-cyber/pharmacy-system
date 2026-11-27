@@ -85,6 +85,7 @@ const { chromium } = require('playwright');
   out.see = await p.textContent('#qaExpSee');
   await p.keyboard.press('Enter');
   out.f3 = await p.evaluate(() => document.activeElement.id);
+  await p.keyboard.type('10');                       // QA-29: the discount (or the net price) is required to add
   for (const field of ['qaNet', 'qaBonus', 'qaBatch']) {
     await p.keyboard.press('Enter');
     await p.waitForFunction(id => document.activeElement.id === id, field);

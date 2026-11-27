@@ -635,6 +635,65 @@ def due(settings, db) -> dict | None:
     return {**req, "needs_db": bool(p.get("needs_db"))}
 
 
+class UpdateAdmission:
+    """Keep cashier requests out of the candidate until the installed launcher commits the swap."""
+
+    def __init__(self, app, home: Path):
+        self.app = app
+        self.home = home
+        state = releases.read_state(home)
+        active = state.get("active") or {}
+        journal = releases.read_journal(home)
+        self.pending_release = None
+        if journal.get("state") in ("ready", "swapped", "undoing"):
+            self.pending_release = journal["release"]
+        elif state.get("pending") and active.get("needs_db"):
+            self.pending_release = active["id"]
+        self.journal_name = releases.journal_path(home).name
+        self.start_version = self._journal_version() if self.pending_release else None
+
+    def _journal_version(self):
+        # Windows directory enumeration provides size and timestamps without opening the
+        # file. The atomic transition from "swapped" to "done" changes its size as well.
+        with os.scandir(self.home) as entries:
+            for entry in entries:
+                if entry.name == self.journal_name:
+                    stat = entry.stat(follow_symlinks=False)
+                    return stat.st_size, stat.st_mtime_ns, stat.st_ino
+        return None
+
+    def _committed(self) -> bool:
+        try:
+            # Keep the journal and pointer closed while the installed launcher is replacing them.
+            if self._journal_version() in (None, self.start_version):
+                return False
+            journal = releases.read_journal(self.home)
+            if journal.get("state") != "done" or journal.get("release") != self.pending_release:
+                return False
+            state = releases.read_state(self.home)
+            return not state.get("pending") and (state.get("active") or {}).get("id") == self.pending_release
+        except (OSError, releases.ReleaseError):
+            return False
+
+    async def __call__(self, scope, receive, send):
+        if (self.pending_release and scope["type"] == "http"
+                and (scope["method"], scope["path"]) != ("GET", "/api/health")):
+            if not self._committed():
+                from starlette.responses import HTMLResponse, JSONResponse
+                message = "تحديث قاعدة البيانات لسه بيخلص. حاول تاني بعد لحظات."
+                headers = {"Cache-Control": "no-store", "Retry-After": "1"}
+                if (scope["method"], scope["path"]) == ("GET", "/"):
+                    response = HTMLResponse('<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8">'
+                                            '<meta http-equiv="refresh" content="1"><title>تحديث قاعدة البيانات</title>'
+                                            f"<p>{message}</p></html>", status_code=503, headers=headers)
+                else:
+                    response = JSONResponse({"error": {"code": "update_pending", "message": message}},
+                                            status_code=503, headers=headers)
+                return await response(scope, receive, send)
+            self.pending_release = None
+        return await self.app(scope, receive, send)
+
+
 class InFlight:
     """ASGI middleware: how many HTTP requests are being handled right now (the update never cuts one)."""
     count = 0

@@ -188,11 +188,15 @@ def cmd_serve(a, s):
         from app.core import tools_folder
         tools_folder.refresh(Path(__file__).resolve().parent, s.data_dir.parent)
     from app.core.accesslog import uvicorn_log_config
+    from app.core.smart_update import UpdateAdmission, home_of
     db = _db(s, create=True)
     import threading
     from app.catalog import matching          # update 1: the fuzzy index is built at start, not on a keystroke
     threading.Thread(target=matching.prewarm, args=(db,), daemon=True, name="fuzzy-prewarm").start()
-    uvicorn.run(create_app(db, s, auto_backup=True), host=a.host, port=a.port, proxy_headers=False,
+    web_app = create_app(db, s, auto_backup=True)
+    # The installed launcher remains in place on a smart update, so the candidate itself must guard its API.
+    web_app.add_middleware(UpdateAdmission, home=home_of(s.data_dir))
+    uvicorn.run(web_app, host=a.host, port=a.port, proxy_headers=False,
                 server_header=False, log_config=uvicorn_log_config())
 
 
