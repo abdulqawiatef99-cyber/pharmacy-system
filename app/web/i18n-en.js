@@ -3669,7 +3669,7 @@ window.I18N_EN = {
 "الخصم % (اكتب 0 لو مفيش) أو سعر الصيدلي": "discount % (type 0 if none) or purchase price",
 "الفاتورة دي معتمدة بالفعل (اتعتمدت من شاشة تانية)": "This invoice is already approved (from another screen)",
 "الفاتورة دي اتلغت من شاشة تانية": "This invoice was cancelled from another screen",
-"الفاتورة اتعدلت من شاشة تانية: راجعها واعتمد تاني": "The invoice was changed from another screen: review it and approve again",
+"الفاتورة اتعدلت قبل الاعتماد: اتحدثت، راجعها واعتمد تاني": "The invoice changed before approval: it was reloaded, review it and approve again",
 "ناقص:": "Missing:",
 "اكتب": "Type",
 "أقل عدد حروف 0": "At least 0 characters",

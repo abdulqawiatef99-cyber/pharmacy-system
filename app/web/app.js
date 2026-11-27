@@ -264,8 +264,12 @@ document.addEventListener("invalid", (e) => {
   e.preventDefault();                                                            // no English bubble
   const msg = fieldMessage(el);
   el.setAttribute("aria-invalid", "true");
+  const had = el.getAttribute("title");
   el.title = msg;
-  const clear = () => { el.removeAttribute("aria-invalid"); if (el.title === msg) el.removeAttribute("title"); };
+  const clear = () => {
+    el.removeAttribute("aria-invalid");
+    if (el.title === msg) { if (had == null) el.removeAttribute("title"); else el.title = had; }
+  };
   el.addEventListener("input", clear, { once: true });
   el.addEventListener("change", clear, { once: true });
   if (Date.now() - FIELD_MSG_AT < 300) return;                                   // one message per submit: the first field
@@ -1861,7 +1865,8 @@ function bindQuickAdd() {
       bad.focus();
       return;
     }
-    const qty = typedWhole($("#qaQty").value), missing = [];
+    const qty = typedWhole($("#qaQty").value);
+    const missing = [];
     if (!(Number(qty) > 0)) missing.push([[$("#qaQty")], "الكمية"]);
     // the cost: the pharmacist's price, or the public price and a discount (0 when there is none)
     if ($("#qaNet").value === "" && ($("#qaDisc").value === "" || $("#qaPrice").value === ""))
@@ -2210,9 +2215,13 @@ async function purchaseTabs(curId) {
   const drafts = (await api("/api/purchases?status=draft")).slice(0, 12);
   box.innerHTML = drafts.map((d) => `<a class="tab ${d.id === curId ? "on" : ""}" href="#/purchases/${esc(d.id)}">${esc(d.supplier_name || "مورد؟")}${d.invoice_no ? ` · ${esc(d.invoice_no)}` : ""}</a>`).join("")
     + `<button class="tab add" id="pNew">+ فاتورة شراء</button>`;
-  $("#pNew").addEventListener("click", async () => {
+  $("#pNew").addEventListener("click", async (e) => {
+    const b = e.currentTarget;
+    if (b.disabled) return;
+    b.disabled = true;                                  // QA-29: a double click made a second, empty draft
     try { const r = await api("/api/purchases", { method: "POST", body: {} }); location.hash = `#/purchases/${r.invoice.id}`; }
     catch (err) { toast(err.message, true); }
+    finally { b.disabled = false; }
   });
 }
 
@@ -2472,13 +2481,13 @@ app.addEventListener("click", async (e) => {
       await viewInvoice(invoice.id);
       if (CUR?.invoice?.status === "approved") toast("الفاتورة دي معتمدة بالفعل (اتعتمدت من شاشة تانية)");
       else if (CUR?.invoice?.status === "cancelled") toast("الفاتورة دي اتلغت من شاشة تانية", true);
-      else toast("الفاتورة اتعدلت من شاشة تانية: راجعها واعتمد تاني", true);
+      else toast("الفاتورة اتعدلت قبل الاعتماد: اتحدثت، راجعها واعتمد تاني", true);
     };
     t.disabled = true;
     try {
       const review = await api(`${base}/approve`);
       if (!t.isConnected || review.version !== invoice.version) {
-        if (t.isConnected) await elsewhere();
+        if (t.isConnected) await elsewhere().catch((e2) => toast(e2.message, true));
         return;
       }
       const decisions = await choosePurchasePrices(review);
@@ -2493,7 +2502,7 @@ app.addEventListener("click", async (e) => {
       purchaseLabels(CUR);
     } catch (err) {
       if (!t.isConnected) return;
-      if (["not_draft", "stale_version"].includes(err.code)) { await elsewhere(); return; }
+      if (["not_draft", "stale_version"].includes(err.code)) { await elsewhere().catch((e2) => toast(e2.message, true)); return; }
       toast(err.message, true);
       if (err.code === "has_blocking_issues") await viewInvoice(invoice.id);
     } finally { t.disabled = false; }

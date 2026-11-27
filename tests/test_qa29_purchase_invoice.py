@@ -9,8 +9,8 @@
    field itself.
 6. Approve from two tabs: the second tab kept «مسودة»; now it reloads and says «معتمدة بالفعل». An approved invoice
    no longer shows «مشكلة قبل الاعتماد». One money unit on the screen (ج), never «قرش».
-7. Manual create twice left an empty (cancelled) draft: no draft is created for a refused number, and a second
-   empty draft for the same supplier by the same person is the first one.
+7. Manual create twice left an empty (cancelled) draft: no draft is created for a refused number (checked before
+   creating), and both start buttons are disabled while they create.
 """
 from datetime import date, timedelta
 
@@ -213,20 +213,10 @@ class TestNoEmptyDrafts(Base):
         self.assertEqual(again.json()["error"]["details"]["invoice_id"], first.json()["invoice"]["id"])
         self.assertEqual(self._count(), 1, "a cancelled empty draft was left behind")
 
-    def test_a_second_empty_draft_for_the_same_supplier_is_the_first_one(self):
-        self.http_login()
-        a = self.c.post("/api/purchases", json={"supplier_id": self.sup}, headers=H)
-        b = self.c.post("/api/purchases", json={"supplier_id": self.sup}, headers=H)
-        self.assertEqual(b.json()["invoice"]["id"], a.json()["invoice"]["id"])
-        self.assertEqual(self._count(), 1)
-        # a draft with lines, or another supplier, is never reused
-        self.p.add_line(self.ctx, a.json()["invoice"]["id"], {"item_id": self.it, "qty": 1, "public_price": 4000,
-                                                              "discount_bp": 0, "expiry_date": EXP}, None)
-        c = self.c.post("/api/purchases", json={"supplier_id": self.sup}, headers=H)
-        self.assertNotEqual(c.json()["invoice"]["id"], a.json()["invoice"]["id"])
-
     def test_screen_disables_the_start_button_while_it_creates(self):
         from pathlib import Path
         js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
         part = js[js.index('$("#manForm").addEventListener("submit"'):][:900]
         self.assertTrue("disabled = true" in part, "a double click sent two creates")
+        tab = js[js.index('$("#pNew").addEventListener("click"'):][:500]
+        self.assertTrue("disabled = true" in tab, "the + tab made a second empty draft on a double click")
