@@ -3660,7 +3660,7 @@ window.I18N_EN = {
 "تشغيل جهاز فرعي": "Set up a secondary device",
 "هذا الجهاز — تشغيل جهاز فرعي": "This device — set up a secondary device",
 "الدرج المرتبط": "Linked drawer",
-"الجهاز ده مش متربط بدرج — اربطه من الإعدادات": "This device has no drawer. Link it in Settings.",
+"الجهاز ده مش مربوط بدرج. المالك أو المدير يدخل على الجهاز ده بكلمة السر (مش الرقم السري)، ويفتح «هذا الجهاز» من شاشة الشيفت، ويختار الدرج ويضغط «اربط هذا الجهاز».": "This device is not linked to a drawer. The owner or a manager signs in on this device with the password (not the PIN), opens «This device» from the shift screen, picks the drawer and presses «Link this device».",
 "اسم الدرج": "Drawer name",
 "طابعة البرنامج": "Default printer",
 "فتح الدرج من الطابعة": "Open drawer from printer",

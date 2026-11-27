@@ -12,7 +12,8 @@ from ..db import Database
 
 COOKIE = "pharm_register"
 COOKIE_AGE = 365 * 24 * 60 * 60
-UNBOUND = "الجهاز ده مش متربط بدرج — اربطه من الإعدادات"
+UNBOUND = ("الجهاز ده مش مربوط بدرج. المالك أو المدير يدخل على الجهاز ده بكلمة السر (مش الرقم السري)، "
+           "ويفتح «هذا الجهاز» من شاشة الشيفت، ويختار الدرج ويضغط «اربط هذا الجهاز».")
 PUBLIC_COLUMNS = "id, name, receipt_printer, label_printer, drawer_kick, active"
 
 

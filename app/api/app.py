@@ -262,7 +262,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
         peer = client_ip(req)
-        local = peer in ("127.0.0.1", "::1")
+        # A local reverse proxy can present a remote browser over a loopback connection.
+        local = (peer in ("127.0.0.1", "::1")
+                 and not any(h in req.headers for h in ("forwarded", "x-forwarded-for", "x-real-ip")))
         ctx = registers.for_request(db, ctx, req.cookies.get(registers.COOKIE), local=local)
         req.state.session_token = token
         req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart

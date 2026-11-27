@@ -3799,7 +3799,7 @@ async function viewRegisters() {
       <option value="on" ${r.drawer_kick === 1 ? "selected" : ""}>شغّال</option></select></label>
     ${r.id ? `<label class="chk"><input name="active" type="checkbox" ${r.active ? "checked" : ""}> درج نشط</label>` : ""}`;
   app.innerHTML = `<section class="panel narrowpanel"><div class="row between"><h1>هذا الجهاز</h1><a href="#/shift">الشيفت</a></div>
-    ${current ? `<p>الدرج المرتبط: <b>${esc(current.name)}</b></p>` : `<p class="badge b-warn">الجهاز ده مش متربط بدرج — اربطه من الإعدادات</p>`}
+    ${current ? `<p>الدرج المرتبط: <b>${esc(current.name)}</b></p>` : `<p class="badge b-warn">الجهاز ده مش مربوط بدرج. المالك أو المدير يدخل على الجهاز ده بكلمة السر (مش الرقم السري)، ويفتح «هذا الجهاز» من شاشة الشيفت، ويختار الدرج ويضغط «اربط هذا الجهاز».</p>`}
     ${cfg.can_manage ? `<form id="registerBind" class="row"><label class="f">درج هذا الجهاز <select name="register_id">
       ${cfg.registers.filter((r) => r.active).map((r) => `<option value="${r.id}" ${r.id === current?.id ? "selected" : ""}>${esc(r.name)}</option>`).join("")}
       </select></label><button class="btn" ${cfg.registers.some((r) => r.active) ? "" : "disabled"}>اربط هذا الجهاز</button></form>

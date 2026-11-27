@@ -1702,12 +1702,12 @@ class Sales:
                                    code="cash_refund_exceeds_paid", details={"max_cash": can, "refund": refund})
             rid = new_id()
             acting_shift = (cash.require_open_shift(self.db, ctx, s["branch_id"]) if refund_method == "cash"
-                            else cash.open_shift_id(self.db, ctx, s["branch_id"]))
+                            else self._acting_shift(ctx, s))
             self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, rounding, refund_method, reason,"
                             " created_by, created_at, channel_id, acting_shift_id, register_recorded)"
-                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
+                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                             (rid, ctx.org_id, sid, refund, rounding_back, refund_method, reason.strip(), ctx.user_id,
-                             _now(), channel_id, acting_shift))
+                             _now(), channel_id, acting_shift, int(acting_shift is not None)))
             # review P1: the sale's returns are line values (sales and profit stay exact); the money paid back,
             # with its rounding, is the return's own total and moves the drawer / card / account
             self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=?", (refund - rounding_back, sid))
@@ -1964,15 +1964,27 @@ class Sales:
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], -s["on_credit"], sid, ctx.user_id))
             change_back = self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
-            acting_shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
+            acting_shift = self._acting_shift(ctx, s)
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?,"
-                            " void_shift_id=?, void_register_recorded=1, version=version+1 WHERE id=?",
-                            (ctx.user_id, _now(), reason, acting_shift, sid))
+                            " void_shift_id=?, void_register_recorded=?, version=version+1 WHERE id=?",
+                            (ctx.user_id, _now(), reason, acting_shift, int(acting_shift is not None), sid))
             audit.record(self.db, ctx, "sale.void", "sale", sid, after={"reason": reason})
             notify.emit(self.db, ctx, "void", "error", f"إلغاء فاتورة {s['sale_no']} — {egp(s['total'])} ج",
                         f"السبب: {reason.strip()}" + registers.alert_suffix(self.db, ctx, s["branch_id"]), "sale", sid)
         # Codex P1: the kept change paid back with the void, shown to the cashier on its own
         return {**self.get(ctx, sid), "change_back": change_back}
+
+    def _acting_shift(self, ctx: Context, sale) -> str | None:
+        """Attribute a void or non-cash refund to the acting shift, then the sale's still-open shift.
+
+        With neither shift available, the report can use its existing branch time window.
+        """
+        current = cash.open_shift_id(self.db, ctx, sale["branch_id"])
+        if current or not sale["shift_id"]:
+            return current
+        original = self.db.one("SELECT id FROM cash_shifts WHERE id=? AND org_id=? AND branch_id=? AND status='open'",
+                               (sale["shift_id"], ctx.org_id, sale["branch_id"]))
+        return original["id"] if original else None
 
     def kept_change(self, ctx: Context, sid: str) -> int:
         """The change of this sale left as the customer's credit and not yet given back (0 if none)."""
