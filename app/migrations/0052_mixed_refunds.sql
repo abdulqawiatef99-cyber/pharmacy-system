@@ -33,5 +33,6 @@ ALTER TABLE sale_payments ADD COLUMN exchange_offset INTEGER NOT NULL DEFAULT 0
     CHECK (exchange_offset BETWEEN 0 AND amount);
 ALTER TABLE sale_payments ADD COLUMN verified_exchange_offset INTEGER NOT NULL DEFAULT 0
     CHECK (verified_exchange_offset BETWEEN 0 AND exchange_offset);
--- The original proof still governs any unreviewed wallet amount carried forward.
-ALTER TABLE sale_payments ADD COLUMN pending_wallet_source TEXT REFERENCES sales(id);
+-- The original proof still governs wallet money carried forward.
+ALTER TABLE sale_payments ADD COLUMN wallet_source_sale TEXT REFERENCES sales(id);
+ALTER TABLE sale_payments ADD COLUMN wallet_source_verified INTEGER NOT NULL DEFAULT 0;

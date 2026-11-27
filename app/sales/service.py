@@ -1136,13 +1136,16 @@ class Sales:
             for p in payments:
                 carried = "source_account" in p
                 verified = p.get("verified_exchange_offset", 0)
+                payment_id = new_id()
                 self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount,"
-                                " exchange_offset, verified_exchange_offset, pending_wallet_source) VALUES (?,?,?,?,?,?,?,?,?)",
-                                (new_id(), ctx.org_id, sid, p["method"], p["channel_id"], p["amount"],
-                                 p.get("exchange_offset", 0), verified, p.get("pending_wallet_source")))
+                                " exchange_offset, verified_exchange_offset, wallet_source_sale, wallet_source_verified)"
+                                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                (payment_id, ctx.org_id, sid, p["method"], p["channel_id"], p["amount"],
+                                 p.get("exchange_offset", 0), verified, p.get("wallet_source_sale"),
+                                 p.get("wallet_source_verified", 0)))
                 if carried:
                     money.carry_sale_payment(self.db, ctx, p["method"], p["channel_id"], p["amount"],
-                                             p["source_account"], sid, note=f"استبدال فاتورة {no}")
+                                             p["source_account"], sid, payment_id, note=f"استبدال فاتورة {no}")
                 elif p["method"] in money.METHODS:
                     money.receive(self.db, ctx, p["method"], p["channel_id"], p["amount"], "sale",
                                   ref_type="sale", ref_id=sid, note=f"فاتورة {no}")
@@ -1939,6 +1942,9 @@ class Sales:
                     raise Conflict("توزيع مبلغ المرتجع اتغير؛ راجع الأرقام", code="refund_changed",
                                    details={"refund_due": refund_due})
                 cash_back = sum(p["amount"] for p in refund_due if p["method"] == "cash")
+                from .attachments import transfer_state
+                wallet_verified = (transfer_state(self.db, ctx.org_id, sid, orig["paid_transfer"])["verified"]
+                                   if orig["paid_transfer"] else 0)
                 offsets = []
                 for part, take in exchange_parts(ret["refund_payments"], n_total):
                     method, channel = part["method"], part["channel_id"]
@@ -1956,7 +1962,8 @@ class Sales:
                                 verified = min(kept, verified_left)
                                 offsets.append({"method": method, "channel_id": channel, "amount": kept,
                                                 "source_account": account, "verified_exchange_offset": verified,
-                                                "pending_wallet_source": sid if method == "transfer" and kept > verified else None})
+                                                **({"wallet_source_sale": sid, "wallet_source_verified": wallet_verified}
+                                                   if method == "transfer" else {})})
                                 verified_left -= verified
                                 remaining -= kept
                     elif take:

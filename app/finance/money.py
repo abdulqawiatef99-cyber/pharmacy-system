@@ -784,9 +784,18 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
                   " AND kind IN ('sale','refund')" + card + " GROUP BY account_id"
                   + (" HAVING sum(CASE WHEN kind='sale' THEN amount ELSE 0 END)>0" if card_only else "")
                   + " ORDER BY min(rowid)", (ctx.org_id, sale_id))
+    excluded = {}
+    if amount is None and not card_only:
+        unavailable = _unavailable_wallet_offsets(db, ctx.org_id, sale_id)
+        if unavailable:
+            for movement in db.all("SELECT account_id,meta FROM money_movements WHERE org_id=? AND ref_id=?"
+                                   " AND kind='sale' AND ref_type='sale'", (ctx.org_id, sale_id)):
+                ref = json.loads(movement["meta"] or "{}").get("payment_id")
+                account = movement["account_id"]
+                excluded[account] = excluded.get(account, 0) + unavailable.get(ref, 0)
     left, out = amount, []
     for r in rows:
-        take = r["net"] if left is None else min(r["net"], left)
+        take = r["net"] - excluded.get(r["account_id"], 0) if left is None else min(r["net"], left)
         if take <= 0:
             continue
         out.append(_post(db, ctx, r["account_id"], -take, "refund", ref_type=ref_type, ref_id=sale_id, note=note,
@@ -810,12 +819,22 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
     return out
 
 
-def carry_sale_payment(db, ctx, method, channel_id, amount, account_id, sale_id, note):
+def carry_sale_payment(db, ctx, method, channel_id, amount, account_id, sale_id, payment_id, note):
     """Keep an exchange offset on the account from which the original refund was posted."""
     if account_id:
         _post(db, ctx, account_id, amount, "sale", ref_type="sale", ref_id=sale_id, note=note,
               check=False, active=False, meta={"method": method, "channel_id": channel_id,
-                                             "exchange_offset": True})
+                                             "exchange_offset": True, "payment_id": payment_id})
+
+
+def _unavailable_wallet_offsets(db, org, sale_id):
+    row = db.one("SELECT s.paid_transfer FROM sales s WHERE s.org_id=? AND s.id=? AND s.paid_transfer>0"
+                 " AND EXISTS (SELECT 1 FROM sale_payments p WHERE p.sale_id=s.id AND p.org_id=s.org_id"
+                 " AND p.wallet_source_sale IS NOT NULL)", (org, sale_id))
+    if not row:
+        return {}
+    from ..sales.attachments import transfer_state
+    return transfer_state(db, org, sale_id, row["paid_transfer"])["unavailable_offsets"]
 
 
 def _tender_account_history(db, org, sale_id, method):
@@ -825,6 +844,7 @@ def _tender_account_history(db, org, sale_id, method):
         " AND kind='sale' AND ref_type='sale' AND json_extract(meta, '$.method')=? ORDER BY rowid",
         (org, sale_id, method))
     balances = {}
+    unavailable = _unavailable_wallet_offsets(db, org, sale_id) if method == "transfer" else {}
     for row in sources:
         meta = json.loads(row["meta"])
         source_channel = meta.get("channel_id")
@@ -835,7 +855,7 @@ def _tender_account_history(db, org, sale_id, method):
                 raise Conflict("حساب وسيلة الدفع الأصلية مش محدد في الفاتورة القديمة", code="ambiguous_wallet_account")
             source_channel = channels[0]["channel_id"] if channels else None
         key = (source_channel, row["account_id"])
-        balances[key] = balances.get(key, 0) + row["amount"]
+        balances[key] = balances.get(key, 0) + row["amount"] - unavailable.get(meta.get("payment_id"), 0)
 
     other_accounts = {r["account_id"] for r in db.all(
         "SELECT DISTINCT account_id FROM money_movements WHERE org_id=? AND ref_id=? AND kind='sale'"

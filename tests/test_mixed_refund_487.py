@@ -476,7 +476,8 @@ class TestMixedRefund(WiringCase):
         replacement = exchange["sale"]
         self.verify_wallet(replacement)
         from app.sales.attachments import transfer_state
-        self.assertEqual(transfer_state(self.db, self.ctx.org_id, sid, 4000)["verified"], 2000)
+        proof_state = transfer_state(self.db, self.ctx.org_id, sid, 4000)
+        self.assertEqual((proof_state["verified"], proof_state["state"]), (2000, "pending"))
         self.call("PUT", "/api/settings/sales", json={"refund_unreviewed_wallet": False})
         self.assertEqual(self.refund(replacement, qty=2, status=409)["error"]["details"]["max_transfer"], 2000)
 
@@ -525,3 +526,51 @@ class TestMixedRefund(WiringCase):
         shift = CashDrawer(self.db).report(self.ctx, sale["shift_id"])
         self.assertEqual(shift["returns_by_method"]["cash"]["count"], 1)
         self.assertEqual(shift["rounding_total"], 0)
+
+    def test_wallet_proof_rejection_follows_verified_value_through_two_exchanges(self):
+        self.call("PUT", "/api/settings/sales", json={"refund_unreviewed_wallet": True})
+        original = self.sale(cash=0, wallet=2000)
+        self.verify_wallet(original)
+        aid = self.db.one("SELECT id FROM sale_attachments WHERE sale_id=?", (original["id"],))[0]
+        replacement = original
+        for _ in range(2):
+            sid = self.draft()
+            self.line(sid, self.pan, units=1)
+            replacement = self.call("POST", f"/api/sales/{replacement['id']}/exchange", json={
+                "new_sale_id": sid, "lines": {replacement["lines"][0]["id"]: 1}, "refund_method": "original",
+                "reason": "استبدال تجربة"})["sale"]
+        self.call("POST", f"/api/attachments/{aid}/review", json={"ok": False, "note": "التحويل لم يصل"})
+        self.assertEqual(self.refund(replacement, status=409)["error"]["details"]["max_transfer"], 0)
+        self.assertEqual(self.bal(self.wallet), 0)
+
+    def test_void_does_not_refund_rejected_carried_wallet_money(self):
+        original = self.sale(cash=0, wallet=2000)
+        self.verify_wallet(original)
+        aid = self.db.one("SELECT id FROM sale_attachments WHERE sale_id=?", (original["id"],))[0]
+        sid = self.draft()
+        self.line(sid, self.pan, units=1)
+        self.call("POST", f"/api/sales/{original['id']}/exchange", json={
+            "new_sale_id": sid, "lines": {original["lines"][0]["id"]: 1}, "refund_method": "original",
+            "reason": "استبدال تجربة"})
+        self.call("POST", f"/api/attachments/{aid}/review", json={"ok": False, "note": "التحويل لم يصل"})
+        before = self.bal(self.wallet)
+        voided = self.call("POST", f"/api/sales/{sid}/void", json={"reason": "إلغاء تجربة"})
+        self.assertEqual(voided["status"], "voided")
+        self.assertEqual((before, self.bal(self.wallet)), (0, 0))
+
+    def test_refund_uses_fresh_wallet_account_after_carried_wallet_is_rejected(self):
+        original = self.sale(cash=0, wallet=2000)
+        self.verify_wallet(original)
+        aid = self.db.one("SELECT id FROM sale_attachments WHERE sale_id=?", (original["id"],))[0]
+        fresh_account = self.call("POST", "/api/money/accounts", 201,
+                                  json={"name": "محفظة فرق الاستبدال", "kind": "wallet"})["id"]
+        self.call("PATCH", f"/api/payment-channels/{self.tr_ch}", json={"account_id": fresh_account})
+        sid = self.draft()
+        self.line(sid, self.pan, units=2)
+        replacement = self.call("POST", f"/api/sales/{original['id']}/exchange", json={
+            "new_sale_id": sid, "lines": {original["lines"][0]["id"]: 1}, "refund_method": "original",
+            "pay_method": "transfer", "channel_id": self.tr_ch, "reason": "استبدال تجربة"})["sale"]
+        self.verify_wallet(replacement)
+        self.call("POST", f"/api/attachments/{aid}/review", json={"ok": False, "note": "التحويل لم يصل"})
+        self.assertEqual(self.split(self.refund(replacement)), [("transfer", 2000)])
+        self.assertEqual((self.bal(self.wallet), self.bal(fresh_account)), (0, 0))

@@ -136,14 +136,14 @@ def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None =
 
 
 def transfer_state(db: Database, org_id: str, sale_id: str, paid_transfer: int) -> dict:
-    """A replacement proof covers fresh transfers. Pending offsets follow their original proof."""
+    """A replacement proof covers fresh transfers. Wallet offsets follow their original proof."""
     return _transfer_state(db, org_id, sale_id, paid_transfer, {})
 
 
 def _transfer_state(db, org, sale_id, paid_transfer, known, rows=None):
     if sale_id in known:
         return known[sale_id]
-    offsets = db.all("SELECT channel_id,exchange_offset,verified_exchange_offset,pending_wallet_source"
+    offsets = db.all("SELECT id,channel_id,exchange_offset,verified_exchange_offset,wallet_source_sale,wallet_source_verified"
                      " FROM sale_payments WHERE org_id=? AND sale_id=? AND method='transfer' AND exchange_offset>0",
                      (org, sale_id))
     fresh_total = paid_transfer - sum(p["exchange_offset"] for p in offsets)
@@ -151,30 +151,38 @@ def _transfer_state(db, org, sale_id, paid_transfer, known, rows=None):
         rows = db.all("SELECT review,confirmed_amount FROM sale_attachments WHERE org_id=? AND sale_id=?",
                       (org, sale_id))
     fresh = _state(rows, fresh_total)
-    by_channel = {}
+    by_channel, unavailable = {}, {}
     carried_problem = False
     for p in offsets:
         amount = p["exchange_offset"]
-        verified = received = p["verified_exchange_offset"]
-        if p["pending_wallet_source"]:
-            source_id = p["pending_wallet_source"]
+        verified = received = 0
+        if p["wallet_source_sale"]:
+            source_id = p["wallet_source_sale"]
             source_total = db.one("SELECT paid_transfer FROM sales WHERE org_id=? AND id=?", (org, source_id))
             if source_total:
                 original = _transfer_state(db, org, source_id, source_total[0], known)
-                # A partial review does not identify which originally unreviewed channel funded this offset.
+                # A smaller approval cannot identify which of several earlier offsets it still covers.
                 if original["verified"] == source_total[0]:
                     verified = amount
-                if original["received"] == source_total[0]:
-                    received = amount
-                else:
-                    carried_problem = True
+                elif original["verified"] >= p["wallet_source_verified"]:
+                    verified = p["verified_exchange_offset"]
+                received = amount if original["received"] == source_total[0] else verified
+        if received < amount:
+            carried_problem = True
+            unavailable[p["id"]] = amount - received
         channel = by_channel.setdefault(p["channel_id"], {"total": 0, "verified": 0, "received": 0})
         for key, value in (("total", amount), ("verified", verified), ("received", received)):
             channel[key] += value
     verified = fresh["verified"] + sum(p["verified"] for p in by_channel.values())
     received = fresh["received"] + sum(p["received"] for p in by_channel.values())
-    state = "ok" if paid_transfer and verified == paid_transfer else "problem" if carried_problem else fresh["state"]
+    if paid_transfer and verified == paid_transfer:
+        state = "ok"
+    elif carried_problem:
+        state = "problem"
+    else:
+        state = "pending" if offsets and fresh["state"] == "ok" else fresh["state"]
     result = {"verified": verified, "received": received, "state": state, "offsets": by_channel,
+              "unavailable_offsets": unavailable,
               "fresh_total": fresh_total, "fresh_verified": fresh["verified"], "fresh_received": fresh["received"]}
     known[sale_id] = result
     return result
