@@ -698,11 +698,13 @@ class Sales:
     def remove_line(self, ctx: Context, sid: str, line_id: str) -> dict:
         ctx.require("sales.create")
         with self.db.transaction():
-            self._draft(ctx, sid)
+            s = self._draft(ctx, sid)
             losses = self._discount_losses(ctx, sid)
+            gone = self._tab_value(ctx, sid, line_id)
             n = self.db.execute("DELETE FROM sale_lines WHERE id=? AND sale_id=?", (line_id, sid)).rowcount
             if not n:
                 raise NotFound("السطر غير موجود")
+            self._audit_tab_loss(ctx, s, "sale.line_removed", gone)       # SEC8: a removed item leaves a trace
             # the same invoice discount is a bigger share of a smaller invoice: an approval given before no longer
             # counts; completion asks again when it passes the limit (review of update 1)
             self.db.execute("UPDATE sales SET version=version+1, invoice_discount_approved_by=NULL,"
@@ -1273,6 +1275,41 @@ class Sales:
             out.append({**dict(r), "lines": n})
         return out
 
+    def _tab_value(self, ctx: Context, sid: str, line_id: str | None = None) -> dict:
+        """What an open tab (or one line of it) holds, priced as the screen shows it: lines, units, value."""
+        rows = self.db.all("SELECT id, qty_base FROM sale_lines WHERE sale_id=? AND org_id=?" + (" AND id=?" if line_id else ""),
+                           (sid, ctx.org_id, line_id) if line_id else (sid, ctx.org_id))
+        out = {"items": len(rows), "units": sum(r["qty_base"] for r in rows), "value": 0}
+        if rows:
+            # an internal read for the audit value only: a seller without sales.read still leaves the priced trace
+            from dataclasses import replace
+            d = self.get(replace(ctx, permissions=frozenset(ctx.permissions) | {"sales.read", "sales.return_others"}), sid)
+            out["value"] = next((l["net"] for l in d["lines"] if l["id"] == line_id), 0) if line_id \
+                else d["total"] - (d.get("delivery_fee") or 0)
+        return out
+
+    def _audit_tab_loss(self, ctx: Context, s, action: str, v: dict, reason: str | None = None) -> None:
+        """SEC8: a tab closed with items, or an item taken off it, is audited on the open shift of this drawer
+        (else on the sale), so the owner's shift summary counts it per employee. Inside the caller's transaction."""
+        if not v["items"]:
+            return
+        shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
+        if not shift:      # a phone or counter PC with no drawer: the branch's open shift, the main drawer first
+            row = self.db.one("SELECT id FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'"
+                              " ORDER BY register_id LIMIT 1", (ctx.org_id, s["branch_id"]))
+            shift = row["id"] if row else None
+        after = {"sale_id": s["id"], "items": v["items"], "units": v["units"], "value": v["value"]}
+        if reason:
+            after["reason"] = reason
+        audit.record(self.db, ctx, action, "cash_shift" if shift else "sale", shift or s["id"], after=after)
+        if action == "sale.tab_discarded":
+            who = self.db.one("SELECT u.full_name FROM users u JOIN memberships m ON m.user_id=u.id AND m.org_id=?"
+                              " WHERE u.id=?", (ctx.org_id, ctx.user_id))
+            notify.emit(self.db, ctx, "tab_discarded", "warning",
+                        f"تبويب بيع اتقفل وفيه {v['items']} صنف بـ {egp(v['value'])} ج",
+                        f"قفله {who['full_name'] if who else ''}" + registers.alert_suffix(self.db, ctx, s["branch_id"]),
+                        "sale", s["id"])
+
     def discard(self, ctx: Context, sid: str) -> None:
         """Close an open invoice tab: only a draft, and only by whoever opened it."""
         ctx.require("sales.create")
@@ -1280,6 +1317,7 @@ class Sales:
             s = self._draft(ctx, sid)
             if s["created_by"] != ctx.user_id:
                 raise Forbidden("هذه الفاتورة مفتوحة باسم شخص آخر")
+            self._audit_tab_loss(ctx, s, "sale.tab_discarded", self._tab_value(ctx, sid))   # SEC8
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=? WHERE id=?",
                             (ctx.user_id, _now(), "تبويب أُغلق قبل البيع", sid))
             self.db.execute("UPDATE sale_deliveries SET status='cancelled' WHERE sale_id=?", (sid,))
@@ -1338,9 +1376,12 @@ class Sales:
             if not l:
                 raise NotFound("السطر غير موجود")
             losses = self._discount_losses(ctx, sid)
+            cut = None
             if qty_base is not None:
                 if not isinstance(qty_base, int) or qty_base <= 0:
                     raise ValidationFailed("الكمية غير صحيحة")
+                if qty_base < l["qty_base"]:          # SEC8 review: a lowered quantity is audited like a removed line
+                    cut = self._tab_value(ctx, sid, line_id)
                 # more units at a typed discount is a bigger discount: the person changing the quantity must be
                 # allowed that rate (or bring an approver), as when it was typed (final review P2-3)
                 if qty_base > l["qty_base"] and discount_bp is None and l["discount_bp"] \
@@ -1376,6 +1417,10 @@ class Sales:
                                 " discount_by=?, discount_approved_by=NULL, discount_approved_bp=NULL WHERE id=?",
                                 (discount_amount, ctx.user_id if discount_amount else None, line_id))
             self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
+            if cut is not None:
+                left = self._tab_value(ctx, sid, line_id)
+                self._audit_tab_loss(ctx, s, "sale.line_reduced", {"items": 1, "units": l["qty_base"] - qty_base,
+                                                                   "value": max(0, cut["value"] - left["value"])})
             self._check_fixed_discounts(ctx, sid, line_id if (discount_amount or qty_base is not None) else None)
             self._check_below_cost(ctx, sid, losses)
         return self.get(ctx, sid)
@@ -1947,6 +1992,7 @@ class Sales:
             if not s:
                 raise NotFound("الفاتورة غير موجودة")
             if s["status"] == "draft":
+                self._audit_tab_loss(ctx, s, "sale.tab_discarded", self._tab_value(ctx, sid), reason)   # SEC8
                 self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?"
                                 " WHERE id=?", (ctx.user_id, _now(), reason, sid))
                 return self.get(ctx, sid)
