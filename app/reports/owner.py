@@ -109,7 +109,7 @@ def staff_performance(db: Database, ctx: Context, date_from: str, date_to: str) 
                     " GROUP BY s.created_by", (o, b, lo, hi)):
         x = p(r["u"])
         x.update(n=r["n"], gross=r["g"], discount=r["d"], total=r["t"], lines=r["lines"], returned_on_his=r["ret"])
-    for r in db.all("SELECT r.created_by u, count(*) n, sum(r.total) t FROM sale_returns r JOIN sales s ON s.id=r.sale_id"
+    for r in db.all("SELECT r.created_by u, count(DISTINCT coalesce(r.part_of,r.id)) n, sum(r.total) t FROM sale_returns r JOIN sales s ON s.id=r.sale_id"
                     " WHERE r.org_id=? AND s.branch_id=? AND r.created_at>=? AND r.created_at<? GROUP BY r.created_by", (o, b, lo, hi)):
         p(r["u"]).update(returns_n=r["n"], returns=r["t"])
     for r in db.all("SELECT voided_by u, count(*) n, sum(total) t FROM sales WHERE org_id=? AND branch_id=? AND status='voided'"
@@ -183,13 +183,23 @@ def returns_report(db: Database, ctx: Context, date_from: str, date_to: str) -> 
     d1, d2, lo, hi = _period(date_from, date_to)
     window = return_window_days(db, ctx.org_id)
     rows = []
+    by_method = {}
+    grouped = {}
     for r in db.all(
-            "SELECT r.id, r.created_at at, r.total, r.refund_method, r.reason, r.created_by, s.id sale_id, s.sale_no, s.completed_at,"
-            " s.created_by sold_by, c.name customer, u.full_name by_name, us.full_name sold_by_name FROM sale_returns r"
-            " JOIN sales s ON s.id=r.sale_id LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN users u ON u.id=r.created_by"
-            " LEFT JOIN users us ON us.id=s.created_by WHERE r.org_id=? AND s.branch_id=? AND r.created_at>=? AND r.created_at<?"
-            " ORDER BY r.created_at DESC", (ctx.org_id, ctx.branch_id, lo, hi)):
-        d = dict(r)
+            "SELECT r.id, r.part_of, r.created_at at, r.total, r.refund_method, r.reason, r.created_by,"
+            " s.id sale_id, s.sale_no, s.completed_at, s.created_by sold_by, c.name customer,"
+            " u.full_name by_name, us.full_name sold_by_name, p.name channel FROM sale_returns r"
+            " JOIN sales s ON s.id=r.sale_id AND s.org_id=r.org_id LEFT JOIN customers c ON c.id=s.customer_id"
+            " LEFT JOIN users u ON u.id=r.created_by LEFT JOIN users us ON us.id=s.created_by"
+            " LEFT JOIN payment_channels p ON p.id=r.channel_id AND p.org_id=r.org_id"
+            " WHERE r.org_id=? AND s.branch_id=? AND r.created_at>=? AND r.created_at<?"
+            " ORDER BY r.created_at DESC, r.rowid", (ctx.org_id, ctx.branch_id, lo, hi)):
+        method = r["refund_method"]
+        by_method[method] = by_method.get(method, 0) + r["total"]
+        d = grouped.setdefault(r["part_of"] or r["id"], {**dict(r), "total": 0, "refund_payments": []})
+        d["total"] += r["total"]
+        d["refund_payments"].append({"method": method, "amount": r["total"], "channel": r["channel"]})
+    for d in grouped.values():
         a = db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale' AND entity_id=? AND action='sale.return'"
                    " AND json_extract(after_json,'$.return_id')=?", (ctx.org_id, d["sale_id"], d["id"]))   # org_id: uses the index
         lines = json.loads(a["after_json"]).get("lines", {}) if a else {}
@@ -200,14 +210,12 @@ def returns_report(db: Database, ctx: Context, date_from: str, date_to: str) -> 
             if it:
                 items.append({**dict(it), "qty": q})
         d["items"] = items
-        d["method_label"] = METHODS.get(d["refund_method"], d["refund_method"])
+        d["method_label"] = "، ".join(
+            METHODS[p["method"]] + (f" · {p['channel']}" if p["channel"] else "") for p in d["refund_payments"])
         d["age_days"] = (_local_date(d["at"]) - _local_date(d["completed_at"])).days if d["completed_at"] else None
         d["late"] = d["age_days"] is not None and d["age_days"] > window
         d["other_seller"] = d["created_by"] != d["sold_by"]
         rows.append(d)
-    by_method = {}
-    for r in rows:
-        by_method[r["refund_method"]] = by_method.get(r["refund_method"], 0) + r["total"]
     sold = db.one("SELECT coalesce(sum(total),0) t FROM sales WHERE org_id=? AND branch_id=? AND status='completed'"
                   " AND completed_at>=? AND completed_at<?", (ctx.org_id, ctx.branch_id, lo, hi))["t"]
     total = sum(r["total"] for r in rows)

@@ -38,8 +38,8 @@ def day_review(db: Database, ctx: Context, day: str | None = None) -> dict:
                    " coalesce(sum(on_credit),0) credit FROM sales WHERE org_id=? AND branch_id=?"
                    " AND status='voided' AND sale_no IS NOT NULL AND voided_at>=? AND voided_at<?", (o, b, lo, hi))
     rets = {r["m"]: {"count": r["n"], "total": r["t"], "rounding": r["rd"]} for r in db.all(
-        "SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t, coalesce(sum(r.rounding),0) rd"
-        " FROM sale_returns r JOIN sales x ON x.id=r.sale_id"
+        "SELECT r.refund_method m, count(DISTINCT coalesce(r.part_of,r.id)) n, coalesce(sum(r.total),0) t, coalesce(sum(r.rounding),0) rd"
+        " FROM sale_returns r JOIN sales x ON x.id=r.sale_id AND x.org_id=r.org_id"
         " WHERE r.org_id=? AND x.branch_id=? AND r.created_at>=? AND r.created_at<? GROUP BY 1", (o, b, lo, hi))}
     pur = dict(db.one(
         "SELECT count(*) n, coalesce(sum(computed_total),0) total FROM purchase_invoices WHERE org_id=? AND branch_id=?"

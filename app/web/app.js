@@ -4520,9 +4520,13 @@ async function viewSalesSimple() {
   }
 }
 
-// #114: the refund goes back the way the sale was paid (credit sale -> the customer's account, card only -> card);
-// the cashier can still pick another method
-function refundDefault(s) {
+// #487: mixed receipts default to the original tender allocation.
+function refundDefault(s, exchange = false) {
+  const tenders = [s.paid_cash, s.paid_card, s.paid_transfer, s.on_credit].filter((n) => n > 0).length;
+  const cards = (s.payments || []).filter((p) => p.method === "card").map((p) => p.channel);
+  const wallets = (s.payments || []).filter((p) => p.method === "transfer").map((p) => p.channel_id);
+  if (tenders > 1 || new Set(cards).size > 1 || new Set(wallets).size > 1 ||
+      (exchange && (s.paid_card || s.paid_transfer))) return "original";
   if (s.on_credit > 0 && !s.paid_cash && s.customer_id) return "credit";
   if (s.paid_card > 0 && !s.paid_cash && !s.on_credit && !s.paid_transfer) return "card";
   if (s.paid_transfer > 0 && !s.paid_cash && !s.on_credit && !s.paid_card) return "transfer";
@@ -4539,15 +4543,22 @@ function cashRefundRoom(s) {
   return Math.max(0, cashIn + (s.paid_card || 0) + (s.paid_transfer || 0) - back);
 }
 
-function refundOptions(s, includeWallet = false) {
+function refundOptions(s, includeWallet = false, exchange = false) {
   const room = cashRefundRoom(s), left = (s.total || 0) + (s.rounding || 0) - (s.returned_total || 0);
   const cash = !room ? "نقدًا من الدرج — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الدرج (حتى ${money(room)} ج)` : "نقدًا من الدرج";
-  const opts = [["cash", cash, !room], ...(s.paid_card ? [["card", "بطاقة", false]] : []),
+  const want = refundDefault(s, exchange);
+  const opts = [["cash", cash, !room], ...(want === "original" ? [["original", "حسب وسائل الدفع الأصلية", false]] : []),
+    ...(s.paid_card && !exchange ? [["card", "بطاقة", false]] : []),
     ...(includeWallet && s.paid_transfer ? [["transfer", "رجّع للمحفظة الأصلية", false]] : []),
     ...(s.customer_id ? [["credit", "على حساب العميل", false]] : [])];
-  const want = refundDefault(s), ok = opts.filter((o) => !o[2]);
+  const ok = opts.filter((o) => !o[2]);
   const pick = ok.some((o) => o[0] === want) ? want : (ok[0] || opts[0])[0];
   return opts.map(([v, t, off]) => ({ value: v, label: t, disabled: off, selected: v === pick }));
+}
+
+const REFUND_METHOD_LABELS = { cash: "نقدي", card: "بطاقة", credit: "على الحساب", transfer: "المحفظة الأصلية" };
+function refundParts(parts) {
+  return parts.map((p) => `${REFUND_METHOD_LABELS[p.method]}${p.channel ? ` · ${p.channel}` : ""} ${money(p.amount)} ج`).join("، ");
 }
 
 // ------------------------------------------------------------------ return + replacement in one operation (part 3 item 6a)
@@ -4577,7 +4588,8 @@ async function viewExchange() {
     try {
       const t = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { preview: true, lines, new_sale_id: draft.id, draft_version: draft.version, refund_method: $("#exRm").value } });
       box.innerHTML = `<div class="totals"><div>قيمة المرتجع<b>${money(t.returned)}</b></div><div>فاتورة الاستبدال<b>${money(t.new_total)}</b></div>
-        <div class="${t.net >= 0 ? "" : "t-ok"}">${t.net >= 0 ? "العميل يدفع" : "يرجع للعميل"}<b>${money(Math.abs(t.net))}</b></div></div>`;
+        <div class="${t.net >= 0 ? "" : "t-ok"}">${t.net >= 0 ? "العميل يدفع" : "يرجع للعميل"}<b>${money(Math.abs(t.net))}</b></div></div>
+        ${t.refund_due?.length ? `<p>${esc(refundParts(t.refund_due))}</p>` : ""}`;
       return { lines, t };
     } catch (e) { box.innerHTML = `<p class="badge b-err">${esc(e.message)}</p>`; return null; }
   };
@@ -4598,14 +4610,18 @@ async function viewExchange() {
       <table><thead><tr><th>الصنف</th><th>الكود</th><th>اتباع</th><th>اترجع قبل كده</th><th>متاح للمرتجع</th><th>الصافي بعد الخصم</th><th>كمية المرتجع</th></tr></thead><tbody>
       ${sale.lines.map((l) => `<tr><td>${bidi(upperEn(l.name))}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
         <td>${l.returnable ? `<input class="narrow" type="number" min="0" max="${l.returnable}" step="1" inputmode="numeric" data-xr="${esc(l.id)}">` : H("اترجع كله")}</td></tr>`).join("")}</tbody></table>
-      <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).filter((o) => o.value !== "card").map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
+      <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full, false, true).map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
         <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
       <h3 class="mt">أصناف الاستبدال</h3><form class="row" id="exAdd"><input name="q" class="grow" placeholder="امسح الباركود أو اكتب الصنف"><input name="n" class="narrow" type="number" min="1" step="1" value="1"><button class="btn small secondary">ضيف</button></form>
       <div id="exNew" class="mt"></div><div id="exTot" class="mt"></div><div id="exSafe" class="mt"></div>
-      <div class="row mt"><label class="f">الفرق يتدفع<select id="exPm"><option value="cash">نقدي</option><option value="card">بطاقة</option>${sale.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
-        <label class="f" id="exChW" hidden>الجهاز<select id="exCh">${(CHANNELS || []).filter((c) => c.kind === "card").map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
+      <div class="row mt"><label class="f">الفرق يتدفع<select id="exPm"><option value="cash">نقدي</option><option value="card">بطاقة</option><option value="transfer">تحويل</option>${sale.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
+        <label class="f" id="exChW" hidden>وسيلة الدفع<select id="exCh"></select></label>
         <button class="btn big" id="exGo">سجّل المرتجع والاستبدال</button></div></section>`;
-    $("#exPm").addEventListener("change", () => { $("#exChW").hidden = $("#exPm").value !== "card" || !$("#exCh").options.length; });
+    $("#exPm").addEventListener("change", () => {
+      const channels = CHANNELS.filter((c) => c.kind === $("#exPm").value);
+      $("#exCh").innerHTML = channels.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("");
+      $("#exChW").hidden = !channels.length;
+    });
     draft = null; drawDraft(); totals();
     // safety findings of the replacement items: shown here, decided here, sent with the exchange (Codex P2 on #396)
     const showFindings = (fs) => {
@@ -4643,9 +4659,9 @@ async function viewExchange() {
       await withBusy(btn, async () => {
         try {
           const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
-            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, cost_reason: draft.cost_reason || null, receipt: true } });
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exCh").value || null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, expected_refund_due: got.t.refund_due, cost_reason: draft.cost_reason || null, receipt: true } });
           exchangeDevices(r);
-          toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
+          toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${refundParts(r.refund_due || got.t.refund_due || [])}`);
           location.hash = `#/sales/${r.sale_id}`;
         } catch (err) {
           if (err.code === "at_cost_reason") {              // U2-33: down to cost only, with a written reason
@@ -4678,6 +4694,14 @@ async function viewSale(id) {
   const s = await api(`/api/sales/${id}`);
   const can = (p) => ME?.permissions?.includes(p);
   const wallets = [...new Map(s.payments.filter((p) => p.method === "transfer").map((p) => [p.channel_id, p.channel])).entries()];
+  const returns = new Map();
+  for (const row of s.returns) {
+    const id = row.part_of || row.id;
+    if (!returns.has(id)) returns.set(id, { ...row, total: 0, parts: [] });
+    const entry = returns.get(id);
+    entry.total += row.total;
+    entry.parts.push({ method: row.refund_method, channel: row.channel, amount: row.total });
+  }
   const returnable = (l) => l.allocations.reduce((t, a) => t + a.qty - (a.returned_qty || 0), 0);
   const fq = (q, l) => fmtStock(q, { pack_size: l.item.pack_size, base_unit_name: l.item.base_unit });
   app.innerHTML = `
@@ -4691,7 +4715,7 @@ async function viewSale(id) {
       <div>العميل<b>${esc(s.customer?.name || "—")}</b></div></div>
     ${s.void_reason ? `<p class="muted">سبب الإلغاء: ${esc(s.void_reason)}</p>` : ""}</section>
   ${s.returns.length ? `<section class="panel"><h2>المرتجعات</h2><table><thead><tr><th>اليوم</th><th>المبلغ</th><th>رُدّ</th><th>السبب</th><th>سجّله</th><th></th></tr></thead><tbody>
-    ${s.returns.map((r) => `<tr><td>${esc(dayOf(r.created_at))} ${hhmm(r.created_at)}</td><td class="num">${money(r.total)}</td><td>${{ cash: "نقدي", card: "بطاقة", credit: "على الحساب", transfer: "المحفظة الأصلية" }[r.refund_method]}${r.channel ? ` · ${esc(r.channel)}` : ""}</td>
+    ${[...returns.values()].map((r) => `<tr><td>${esc(dayOf(r.created_at))} ${hhmm(r.created_at)}</td><td class="num">${money(r.total)}</td><td>${esc(refundParts(r.parts))}</td>
       <td>${esc(r.reason)}</td><td>${esc(r.by_name || "")}</td><td><a class="btn small secondary" href="/return-receipt/${esc(r.id)}" target="_blank">🖨 إيصال المرتجع</a></td></tr>`).join("")}</tbody></table></section>` : ""}
   ${s.paid_transfer || s.attachments.length ? `<section class="panel"><h2>صورة التحويل ${s.paid_transfer && !s.attachments.length ? `<span class="badge b-warn">⚠ لا توجد صورة</span>` : ""}</h2>
     <div class="proofs">${s.attachments.map((a) => `<figure>${a.mime_type === "application/pdf" ? `<a href="/api/attachments/${esc(a.id)}" target="_blank">📄 PDF</a>`
@@ -4744,7 +4768,7 @@ async function viewSale(id) {
       const refund_method = $("#rMethod").value;
       const channel_id = refund_method === "transfer" ? $("#rWallet")?.value || null : null;
       const r = await api(`/api/sales/${id}/return`, { method: "POST", body: { lines, refund_method, channel_id, reason: $("#rReason").value } });
-      toast(`تم تسجيل المرتجع: ${money(r.refund)} ج${r.change_back ? ` + رجّع له نقدي ${money(r.change_back)} ج باقي كان سايبه رصيد (المجموع ${money(r.refund + r.change_back)} ج)` : ""} — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
+      toast(`تم تسجيل المرتجع: ${r.refund_payments?.length > 1 ? refundParts(r.refund_payments) : money(r.refund) + " ج"}${r.change_back ? ` + رجّع له نقدي ${money(r.change_back)} ج باقي كان سايبه رصيد (المجموع ${money(r.refund + r.change_back)} ج)` : ""} — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
     } catch (e) { btn.disabled = false; toast(e.message, true); }
   });
   $("#proofUp")?.addEventListener("change", async (e) => {
@@ -6678,6 +6702,8 @@ async function viewShift(opts = {}) {
       ${(sh.by_channel || []).map((c) => `<div>${c.method === "card" ? "بطاقة" : "تحويل"} — ${esc(c.channel)}
         <b>${money(c.amount - (c.refunded || 0))}</b>${c.refunded ? `<span>مبيعات ${money(c.amount)} · مرتجع ${money(c.refunded)}</span>` : ""}</div>`).join("")}
       ${sh.with_courier ? `<div>مع مندوب التوصيل<b>${money(sh.with_courier)}</b><span class="badge b-warn">⚠ لم تُسلَّم بعد</span></div>` : ""}</div>`}
+    ${sh.refund_payments?.length ? `<details class="mt"><summary>تفاصيل مبالغ المرتجعات</summary>
+      <ul>${sh.refund_payments.map((p) => `<li>فاتورة ${esc(p.sale_no)} — ${esc(refundParts([p]))}</li>`).join("")}</ul></details>` : ""}
     ${ME.permissions.includes("cash.manage") ? `<form id="shPay" class="row mt"><label class="f">مصروف من الخزينة (ج) <input name="a" type="number" step="0.25" min="0"></label>
       <label class="f grow">السبب <input name="n"></label><button class="btn secondary small">سجّل</button></form>` : ""}
   </section>
@@ -8689,7 +8715,10 @@ async function viewUsers() {
       <button class="btn small secondary" data-rsave="${r.code}">احفظ</button></span></label>`).join("")}</div></section>
   <section class="panel"><h2>مدة المرتجع</h2>
     <form id="retWin" class="row"><label class="f">عدد الأيام <input class="narrow" type="number" min="0" max="365" name="days" value="${sales.return_window_days}"></label>
-    <button class="btn small secondary">احفظ</button></form>
+    <label class="f">توزيع مرتجع الدفع المختلط<select name="allocation">
+      <option value="original_order" ${sales.refund_allocation === "original_order" ? "selected" : ""}>البطاقة، ثم المحافظ، ثم النقدي، ثم الحساب</option>
+      <option value="proportional" ${sales.refund_allocation === "proportional" ? "selected" : ""}>بنسبة المبلغ المتبقي في كل وسيلة</option>
+    </select></label><button class="btn small secondary">احفظ</button></form>
     <p class="muted">بعد هذه المدة يحتاج المرتجع إلى المالك (أو من منحه المالك هذه الصلاحية "مرتجع بعد مدة المرتجع").</p></section>`;
   document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/users/${tr.dataset.go}`; }));
   $("#uNew").addEventListener("submit", async (e) => {
@@ -8706,7 +8735,7 @@ async function viewUsers() {
   }));
   $("#retWin").addEventListener("submit", async (e) => {
     e.preventDefault();
-    try { await api("/api/settings/sales", { method: "PUT", body: { return_window_days: +e.target.days.value } }); toast("تم الحفظ"); }
+    try { await api("/api/settings/sales", { method: "PUT", body: { return_window_days: +e.target.days.value, refund_allocation: e.target.allocation.value } }); toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });
 }

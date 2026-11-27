@@ -27,12 +27,12 @@ const s = (paid_cash, paid_card, on_credit, customer_id = "c1", paid_transfer = 
   ({ paid_cash, paid_card, on_credit, customer_id, paid_transfer });
 console.log(JSON.stringify([
   refundDefault(s(0, 0, 5000)),            // all on credit -> the customer's account
-  refundDefault(s(0, 2000, 3000)),         // card + credit, no cash -> account
-  refundDefault(s(2000, 0, 3000)),         // cash + credit -> cash (the cashier splits by hand if needed)
+  refundDefault(s(0, 2000, 3000)),         // card + credit -> original tenders
+  refundDefault(s(2000, 0, 3000)),         // cash + credit -> original tenders
   refundDefault(s(0, 5000, 0)),            // card only -> card
   refundDefault(s(5000, 0, 0)),            // cash -> cash
   refundDefault(s(0, 0, 5000, null)),      // no customer (cannot happen for credit): never an option it lacks
-  refundDefault(s(0, 2000, 0, null, 3000)) // card + transfer -> cash, as before
+  refundDefault(s(0, 2000, 0, null, 3000)) // card + transfer -> original tenders
 ]));
 """
 
@@ -42,7 +42,7 @@ class TestRefundDefault(unittest.TestCase):
     def test_default_follows_the_payment(self):
         r = subprocess.run([shutil.which("node"), "-e", RULE], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout), ["credit", "credit", "cash", "card", "cash", "cash", "cash"])
+        self.assertEqual(json.loads(r.stdout), ["credit", "original", "original", "card", "cash", "cash", "original"])
 
 
 OPTS_FN = "".join(re.search(rf"\nfunction {n}\(.*?\n\}}\n", JS, re.S).group(0)
@@ -71,7 +71,7 @@ class TestRefundOptions(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
         self.assertEqual(out[0], [["cash", True, False], ["credit", False, True]])           # cash disabled
-        self.assertEqual(out[1], [["cash", False, True], ["credit", False, False]])          # both open
+        self.assertEqual(out[1], [["cash", False, False], ["original", False, True], ["credit", False, False]])
         self.assertEqual(out[2], "نقدًا من الدرج (حتى 30.00 ج)")                          # the cap is shown
         self.assertEqual(out[3], [["cash", False, False], ["card", False, True]])           # card back to card
         self.assertEqual(out[4], [["cash", False, True]])                                   # no card option

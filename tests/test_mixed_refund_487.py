@@ -64,10 +64,10 @@ class TestMixedRefund(WiringCase):
         self.assertEqual(self.call("GET", "/api/settings/sales").get("refund_allocation"), "original_order")
         self.call("PUT", "/api/settings/sales", json={"refund_allocation": "proportional"})
         self.call("PUT", "/api/settings/sales", 422, json={"refund_allocation": "invalid"})
-        sale = self.sale(cash=3999, card=2001, units=3)
+        sale = self.sale(cash=4000, card=2000, units=3)
         self.assertEqual(self.split(self.refund(sale)), [("card", 667), ("cash", 1333)])
         self.assertEqual(self.split(self.refund(sale)), [("card", 667), ("cash", 1333)])
-        self.assertEqual(self.split(self.refund(sale)), [("card", 667), ("cash", 1333)])
+        self.assertEqual(self.split(self.refund(sale)), [("card", 666), ("cash", 1334)])
         self.assertEqual((self.drawer(), self.bal(self.paymob)), (10000, 0))
 
     def test_wallet_verified_cap_and_rollback(self):
@@ -117,6 +117,9 @@ class TestMixedRefund(WiringCase):
             self.db.execute("UPDATE sales SET completed_at='2026-01-05T10:00:00.000000Z' WHERE id=?", (sale["id"],))
         previous = hikma_claim.claim(self.db, self.ctx, "shibin", self.today, self.today)["previous_returns"]
         self.assertEqual(previous["value"], 2000)
+        self.assertEqual([r["value"] for r in previous["rows"]], [2000])
+        self.assertEqual({p["method"]: p["amount"] for p in report["refund_payments"]},
+                         {"card": 500, "credit": 500, "cash": 1000})
 
     def test_electronic_exchange_cheaper_equal_dearer_keeps_original_account(self):
         from app.catalog import service
@@ -145,3 +148,36 @@ class TestMixedRefund(WiringCase):
                     self.assertEqual(self.drawer() - drawer, max(0, price - 2000))
                     self.assertEqual(out["sale"]["payments"][0]["channel"], sale["payments"][0]["channel"])
                     self.assertEqual(self.split(self.refund(out["sale"]))[0], (method, min(price, 2000)))
+
+    def test_rejected_fresh_wallet_top_up_preserves_inherited_wallet_account(self):
+        sale = self.sale(cash=0, wallet=2000)
+        self.verify_wallet(sale)
+        new_wallet = self.call("POST", "/api/money/accounts", 201,
+                               json={"name": "محفظة بديلة", "kind": "wallet"})["id"]
+        self.call("PATCH", f"/api/payment-channels/{self.tr_ch}", json={"account_id": new_wallet})
+        sid = self.draft()
+        self.line(sid, self.pan, units=2)
+        out = self.call("POST", f"/api/sales/{sale['id']}/exchange", json={
+            "new_sale_id": sid, "lines": {sale["lines"][0]["id"]: 1}, "refund_method": "original",
+            "reason": "استبدال تجربة", "pay_method": "transfer", "channel_id": self.tr_ch})
+        self.assertEqual((self.bal(self.wallet), self.bal(new_wallet)), (2000, 2000))
+        from io import BytesIO
+        data = self.call("POST", f"/api/sales/{sid}/attachments",
+                         files={"file": ("test.png", BytesIO(PNG), "image/png")})
+        self.call("POST", f"/api/attachments/{data['attachments'][-1]['id']}/review",
+                  json={"ok": False, "note": "الفرق لم يصل"})
+        self.assertEqual((self.bal(self.wallet), self.bal(new_wallet)), (2000, 0))
+        self.assertEqual(self.split(self.refund(out["sale"])), [("transfer", 2000)])
+        self.assertEqual((self.bal(self.wallet), self.bal(new_wallet)), (0, 0))
+
+    def test_rounding_and_kept_change_stay_with_cash_on_final_return(self):
+        customer = self.call("POST", "/api/customers", 201, json={"name": "عميل تجربة", "credit_limit": 100000})["id"]
+        from app.sales.rounding import set_step
+        set_step(self.db, self.ctx, 100)
+        sale = self.sale(cash=1000, card=3049, units=2, customer=customer, keep_change=True, cash_given=1030)
+        self.assertEqual(self.split(self.refund(sale)), [("card", 2000)])
+        final = self.refund(sale)
+        self.assertEqual((self.split(final), final["change_back"]), ([("card", 1049), ("cash", 1000)], 30))
+        rounding = self.db.all("SELECT refund_method, rounding FROM sale_returns WHERE rounding<>0")
+        self.assertEqual([tuple(r) for r in rounding], [("cash", 49)])
+        self.assertEqual(self.drawer(), 10000)

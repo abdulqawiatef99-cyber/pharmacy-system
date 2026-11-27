@@ -76,7 +76,7 @@ def day_checks(db: Database, ctx: Context, *, backup: dict | None = None, day: d
     out.append(_c("expenses", "warn" if exp["n"] else "ok", "مصروفات مستنية الموافقة",
                   (f"{exp['n']} مصروف مستني موافقة المالك أو المدير" + (f" ({_egp(exp['t'])} ج)" if money_ok else ""))
                   if exp["n"] else "مفيش مصروفات مستنية"))
-    ret = db.one("SELECT count(*) n, coalesce(sum(total),0) t FROM sale_returns WHERE org_id=? AND created_at>=?"
+    ret = db.one("SELECT count(DISTINCT coalesce(part_of,id)) n, coalesce(sum(total),0) t FROM sale_returns WHERE org_id=? AND created_at>=?"
                  " AND created_at<?", (org, lo, hi))
     voids = db.one("SELECT count(*) n FROM audit_log WHERE org_id=? AND action='sale.void' AND at>=? AND at<?",
                    (org, lo, hi))["n"]

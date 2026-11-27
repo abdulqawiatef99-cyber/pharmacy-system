@@ -1,6 +1,16 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"تفاصيل مبالغ المرتجعات": "Refund payment details",
+"توزيع مبلغ المرتجع اتغير؛ راجع الأرقام": "The refund allocation changed. Review the amounts.",
+"وسيلة الدفع": "Payment method",
+"حسب وسائل الدفع الأصلية": "Original payment methods",
+"توزيع مرتجع الدفع المختلط": "Mixed-payment refund allocation",
+"البطاقة، ثم المحافظ، ثم النقدي، ثم الحساب": "Card, then wallets, then cash, then customer account",
+"بنسبة المبلغ المتبقي في كل وسيلة": "In proportion to the remaining amount on each method",
+"اختر طريقة توزيع المرتجع": "Choose how refunds are allocated",
+"حساب وسيلة الدفع الأصلية مش محدد في الفاتورة القديمة": "The original payment account is ambiguous on this older invoice",
+"المبلغ المتاح على وسائل الدفع الأصلية": "Amount available across the original payment methods",
 "افتح حساب مورد (للدفع أو كشف الحساب)": "Open a supplier's account (to pay or see the statement)",
 "اكتب اسم المورد أو تليفونه": "Type the supplier's name or phone",
 "اكتب اسم المورد": "Type the supplier's name",
