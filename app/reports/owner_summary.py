@@ -120,20 +120,19 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
 
     def who(e):
         return (e["by"] or "") + (f" (باعها {e['sold_by']})" if e["sold_by"] and e["sold_by"] != e["by"] else "")
-    noncash = [p for p in r["refund_payments"] if p["method"] != "cash"]
-    if voids or refunds or noncash:
-        for e in voids:
-            lines.append(f"• إلغاء فاتورة {e['sale_no']} — {_egp(e['amount'])} ج — {_local(e['at'], tf)} — {who(e)}"
-                         f" — السبب: {(e['reason'] or '').strip()}")
-        for e in refunds:
-            lines.append(f"• مرتجع نقدي فاتورة {e['sale_no']} — {_egp(e['amount'])} ج — {_local(e['at'], tf)} — {who(e)}"
-                         f" — السبب: {(e['reason'] or '').strip()}")
-        labels = {"card": "بطاقة", "transfer": "محفظة", "credit": "على حساب العميل"}
-        for p in noncash:
+    if not (voids or refunds):
+        lines.append("مفيش إلغاء ولا مرتجع نقدي في الشيفت ده")
+    for e in voids:
+        lines.append(f"• إلغاء فاتورة {e['sale_no']} — {_egp(e['amount'])} ج — {_local(e['at'], tf)} — {who(e)}"
+                     f" — السبب: {(e['reason'] or '').strip()}")
+    for e in refunds:
+        lines.append(f"• مرتجع نقدي فاتورة {e['sale_no']} — {_egp(e['amount'])} ج — {_local(e['at'], tf)} — {who(e)}"
+                     f" — السبب: {(e['reason'] or '').strip()}")
+    labels = {"card": "بطاقة", "transfer": "محفظة", "credit": "على حساب العميل"}
+    for p in r["refund_payments"]:
+        if p["method"] in labels:
             channel = f" · {p['channel']}" if p["channel"] else ""
             lines.append(f"• مرتجع فاتورة {p['sale_no']} — {labels[p['method']]}{channel} — {_egp(p['amount'])} ج")
-    else:
-        lines.append("مفيش إلغاء ولا مرتجع نقدي في الشيفت ده")
     lines.append(f"إجمالي اليوم {the_day.isoformat()} (كل الشيفتات): إلغاء {day['voids']} فاتورة بـ {_egp(day['voids_total'])} ج · "
                  f"مرتجع نقدي {day['cash_refunds']} بـ {_egp(day['cash_refunds_total'])} ج")
     if out:
