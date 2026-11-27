@@ -28,6 +28,22 @@ from ..db import Database, new_id
 from . import service as inventory
 
 
+REPEAT_SECONDS = 2
+
+
+def _repeat_add(db, live, qty: int) -> bool:
+    """Was the live entry itself an add of exactly `qty`, saved less than REPEAT_SECONDS ago?"""
+    from ..core.accounts import parse_iso, utcnow
+    try:
+        age = (utcnow() - parse_iso(live["counted_at"])).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    if not 0 <= age < REPEAT_SECONDS:
+        return False
+    prev = db.one("SELECT qty FROM count_entries WHERE superseded_by=?", (live["id"],))
+    return live["qty"] - (prev["qty"] if prev else 0) == qty
+
+
 def _now() -> str:
     from ..core.accounts import iso, utcnow
     return iso(utcnow())
@@ -144,7 +160,7 @@ class Counting:
 
     def record(self, ctx: Context, sid: str, *, item_id: str, qty: int, batch_id: str | None = None,
                location: str = "", mode: str = "set", recount: bool = False,
-               device: str | None = None) -> dict:
+               device: str | None = None, confirm_repeat: bool = False) -> dict:
         ctx.require("inventory.count")
         if mode not in ("set", "add"):
             raise ValidationFailed("وضع غير صحيح")
@@ -173,6 +189,12 @@ class Counting:
                     if self._moved_between(ctx, s["branch_id"], item_id, key, live["ledger_seq"], None):
                         raise Conflict("الصنف ده اتباع أو اتحرك بعد ما بدأت تعدّه؛ عدّه من الأول (عدّ جديد مش إضافة)",
                                        code="moved_since_first_scan")
+                    # QA-29: the same +N by the same person on the same line within REPEAT_SECONDS is a double
+                    # click or a double scanner read until the person says it is real: +3 twice silently became 6
+                    if not confirm_repeat and _repeat_add(self.db, live, qty):
+                        raise Conflict(f"اتسجل +{qty} للصنف ده من ثانية. تضيف {qty} كمان (الإجمالي يبقى {live['qty'] + qty})؟",
+                                       code="repeat_add", details={"qty": qty, "total": live["qty"],
+                                                                   "would_be": live["qty"] + qty})
                     new_qty = live["qty"] + qty
                 elif live["counted_by"] != ctx.user_id and not recount:
                     raise Conflict("هذا الصنف جُرد من قبل في المكان نفسه", code="already_counted",

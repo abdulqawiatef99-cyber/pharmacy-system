@@ -60,8 +60,9 @@ class TestCounting(CountCase):
 
     def test_scanning_mode_adds_up(self):
         sid = self.cnt.create(self.ctx, title="x")
-        for _ in range(3):
-            self.cnt.record(self.actx, sid, item_id=self.b, qty=1, mode="add")
+        for k in range(3):
+            # QA-29: the same +1 within 2 s is asked first (a double read); here each one is confirmed as real
+            self.cnt.record(self.actx, sid, item_id=self.b, qty=1, mode="add", confirm_repeat=k > 0)
         self.assertEqual(self.cnt.variances(self.ctx, sid)["lines"][0]["counted"], 3)
 
     def test_sales_during_count_are_accounted(self):

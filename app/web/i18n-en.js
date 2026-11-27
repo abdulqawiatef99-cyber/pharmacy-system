@@ -3674,4 +3674,7 @@ window.I18N_EN = {
 "اكتب": "Type",
 "أقل عدد حروف 0": "At least 0 characters",
 "أقصى عدد حروف 0": "At most 0 characters",
+"ماتضافش تاني": "Not added again",
+"✓ اتحفظ البيع — فاتورة 0 0": "✓ Sale saved — invoice 0 0",
+"✓ اتحفظ البيع —": "✓ Sale saved —",
 };
