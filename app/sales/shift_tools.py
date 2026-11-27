@@ -119,6 +119,22 @@ def split_for(counted: dict, target: dict, float_left: int | None = None) -> dic
     return {"keep": {}, "move": {}, "float_left": float_left, "to_treasury": total - float_left, "short": 0, "exact": False}
 
 
+def largest_makeable(counted: dict, at_most: int) -> int:
+    """The largest amount up to `at_most` that the counted notes make exactly (25-piaster steps); 0 when none.
+    The default float when the closer typed none (review of #500): the opening cash, or less when the notes
+    cannot make it, never a refusal of a choice the closer did not make."""
+    if at_most <= 0:
+        return 0
+    goal = at_most // 25
+    reach = 1                                          # bit i set: 25*i piasters can be made
+    for d in sorted(DENOMINATIONS, reverse=True):
+        n, step = int(counted.get(str(d), 0) or 0), d // 25
+        for _ in range(min(n, goal // step if step else 0)):
+            reach |= reach << step
+        reach &= (1 << (goal + 1)) - 1
+    return (reach.bit_length() - 1) * 25
+
+
 def _exact_notes(counted: dict, amount: int) -> dict | None:
     """Notes from the count that make `amount` exactly (bounded search in 25-piaster steps), largest notes first;
     None when no combination makes it (Codex P2 on #404)."""

@@ -187,6 +187,33 @@ class TestShiftClose(DBTestCase):
         self.assertEqual(self.db.one("SELECT amount FROM money_movements WHERE ref_id=?", (shift,))[0], 8000)
 
 
+class TestShiftCloseDefaultFloat(DBTestCase):
+    """Review of #500 (P1): with no float typed, the server's own default (the opening cash) was refused when the
+    counted notes could not make it, and the close screen said «عدّها بإيدك»: a close nobody could finish without
+    guessing a float. The default now leaves the largest amount up to the opening cash that the notes make."""
+
+    def test_untyped_float_leaves_what_the_notes_can_make(self):
+        drawer = CashDrawer(self.db)
+        shift = drawer.open(self.ctx, 7500)
+        result = drawer.close(self.ctx, denominations={"5000": 2}, shift_id=shift, note="فرق تجربة")  # two 50s
+        self.assertEqual(result["float_split"]["float_left"], 5000)                    # 75 cannot be made: 50 stays
+        self.assertEqual(self.db.one("SELECT amount FROM money_movements WHERE ref_id=?", (shift,))[0], 5000)
+
+    def test_untyped_float_with_no_note_small_enough_moves_everything(self):
+        drawer = CashDrawer(self.db)
+        shift = drawer.open(self.ctx, 2000)
+        result = drawer.close(self.ctx, denominations={"5000": 1}, shift_id=shift, note="فرق تجربة")
+        self.assertEqual(result["float_split"]["float_left"], 0)
+        self.assertEqual(self.db.one("SELECT amount FROM money_movements WHERE ref_id=?", (shift,))[0], 5000)
+
+    def test_a_typed_float_is_still_refused_when_the_notes_cannot_make_it(self):
+        drawer = CashDrawer(self.db)
+        shift = drawer.open(self.ctx, 7500)
+        with self.assertRaises(ValidationFailed) as error:
+            drawer.close(self.ctx, denominations={"5000": 2}, float_left=7500, shift_id=shift, note="فرق تجربة")
+        self.assertEqual(error.exception.code, "float_split_impossible")
+
+
 class TestLegacyVat(DBTestCase):
     def setUp(self):
         super().setUp()

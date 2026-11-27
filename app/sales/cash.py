@@ -254,6 +254,9 @@ class CashDrawer:
                 raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large",
                                        details={"counted": counted_cash, "float_left": left})
             split = None
+            if detail and float_left is None and left:
+                # nobody typed a float: the default (the opening cash) becomes what the notes can make (review of #500)
+                left = shift_tools.largest_makeable(detail, left)
             if detail:
                 split = shift_tools.split_for(detail, shift_tools.get_target(self.db, ctx.org_id), left)
                 if split.get("exact") is False:
