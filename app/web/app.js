@@ -2595,21 +2595,15 @@ let LABEL_CFG = null;
 const labelSize = (f) => (f.label_preset.value === "custom" ? `${+f.label_w.value}x${+f.label_h.value}` : f.label_preset.value);
 const labelFields = (f) => Object.fromEntries([...f.querySelectorAll("[data-lf]")].map((x) => [x.dataset.lf, x.checked]));
 async function printLabels(list) {
-<<<<<<< HEAD
-  const url = `/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`;
+  const q = list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",");
   // QA-29: the page is asked first (check=1 prints and records nothing), so a refusal is said, not lost in the frame
   const page = async () => {
-    try { await api(`${url}&check=1`); } catch (er) { toast(er.message, true); return; }
-    printInFrame(url);
+    try { await api(`/labels?items=${q}&check=1`); } catch (er) { toast(er.message, true); return; }
+    printInFrame(`/labels?items=${q}`);
   };
-  try { LABEL_CFG ||= await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
-  if (LABEL_CFG.label_lang === "browser" || LABEL_CFG.label_lang === "a4") return page();
-=======
-  const page = () => printInFrame(`/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`);
   try { LABEL_CFG = await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
   const mode = LABEL_CFG.device_label_lang || LABEL_CFG.label_lang;
   if (mode === "browser" || mode === "a4") return page();
->>>>>>> origin/develop
   try { const r = await api("/api/print/labels", { method: "POST", body: { items: list.map(([id, n]) => ({ id, count: n })) } }); toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); }
   catch (er) {
     if (er.code === "labels_in_browser") return page();
