@@ -4938,13 +4938,15 @@ async function viewItemHealth() {
   app.innerHTML = `<section class="panel"><div class="row between"><h1>فحص بيانات الأصناف</h1><button class="btn secondary" id="ihRe">افحص تاني</button></div>
     <p class="muted">البرنامج بيدوّر على الأخطاء في بيانات الأصناف ومبيغيّرش حاجة لوحده. «صحّح» بيفتح بطاقة الصنف وانت اللي بتقرر.</p>
     <div id="ihChips" class="row"></div><div id="ihOut" class="muted">بيفحص…</div></section>`;
-  let only = "", limit = 200;           // QA-29: the first 200 rows (of the chosen kind) and the full counts
+  let only = "", limit = 200, seq = 0;  // QA-29: the first 200 rows (of the chosen kind) and the full counts
   const load = async () => {
-    const r = await api(`/api/reports/item-health?${new URLSearchParams({ limit: String(limit), ...(only ? { key: only } : {}) })}`);
+    const n = ++seq, kind = only;
+    const r = await api(`/api/reports/item-health?${new URLSearchParams({ limit: String(limit), ...(kind ? { key: kind } : {}) })}`);
+    if (n !== seq || !$("#ihOut")) return;              // a late answer never replaces a newer choice (Codex P2)
     const draw = () => {
       $("#ihChips").innerHTML = `<button class="btn small ${only ? "secondary" : ""}" data-k="">الكل (${r.total ?? r.rows.length})</button>`
         + Object.entries(r.counts).map(([k, n]) => `<button class="btn small ${only === k ? "" : "secondary"}" data-k="${esc(k)}">${esc(IH_KEYS[k] || k)} (${n})</button>`).join("");
-      const rows = r.rows.filter((x) => !only || x.key === only), all = r.matching ?? rows.length;
+      const rows = r.rows.filter((x) => !kind || x.key === kind), all = r.matching ?? rows.length;
       $("#ihOut").className = "";
       $("#ihOut").innerHTML = rows.length ? `<table><thead><tr><th>الصنف</th><th>المشكلة</th><th>التفاصيل</th><th></th></tr></thead><tbody>
         ${rows.map((x) => `<tr><td>${esc(x.name)}${x.code ? ` <span class="muted small">${esc(x.code)}</span>` : ""}</td>
