@@ -810,11 +810,12 @@ def reverse_sale(db: Database, ctx: Context, sale_id: str, amount: int | None = 
     return out
 
 
-def carry_sale_payment(db, ctx, method, channel_id, amount, account_id, sale_id, note):
+def carry_sale_payment(db, ctx, method, channel_id, amount, account_id, sale_id, note, *, verified):
     """Keep an exchange offset on the account from which the original refund was posted."""
     if account_id:
         _post(db, ctx, account_id, amount, "sale", ref_type="sale", ref_id=sale_id, note=note,
-              check=False, active=False, meta={"method": method, "channel_id": channel_id, "exchange_offset": True})
+              check=False, active=False, meta={"method": method, "channel_id": channel_id,
+                                             "exchange_offset": True, "verified_offset": verified})
 
 
 def _tender_account_history(db, org, sale_id, method):
@@ -958,8 +959,10 @@ def settle_transfer_review(db: Database, ctx: Context, sale_id: str, received: i
     for r in db.all("SELECT account_id, amount, meta FROM money_movements WHERE org_id=? AND ref_id=? AND kind='sale'"
                     " AND ref_type='sale' ORDER BY rowid", (ctx.org_id, sale_id)):
         meta = json.loads(r["meta"] or "{}")
-        if meta.get("method") == "transfer" and not meta.get("exchange_offset"):
-            got[r["account_id"]] = got.get(r["account_id"], 0) + r["amount"]
+        if meta.get("method") == "transfer":
+            reviewable = r["amount"] - meta.get("verified_offset", 0)
+            if reviewable:
+                got[r["account_id"]] = got.get(r["account_id"], 0) + reviewable
     routed = sum(got.values())
     if not routed:
         return 0

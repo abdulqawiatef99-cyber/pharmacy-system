@@ -1797,18 +1797,29 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def sales_settings(req):
-        from ..sales.refunds import ALLOCATION_POLICIES, allocation_policy
+        from ..sales.refunds import ALLOCATION_POLICIES, METHODS, RULE_DEFAULTS, allocation_policy, rule_settings
         from ..sales.service import LINE_ORDERS, line_order, return_window_days
         ctx = ctx_of(req)
         if req.method == "PUT":
             ctx.require("settings.manage")
             b = await body(req)
+            rules = RULE_DEFAULTS.keys() & b.keys()
+            if (rules or "refund_allocation" in b) and not ctx.is_owner:
+                raise Forbidden("إعدادات رد المدفوعات للمالك فقط")
             if "line_order" in b and b["line_order"] not in LINE_ORDERS:
                 raise ValidationFailed("اختر ترتيب الأصناف")
             if "refund_allocation" in b and b["refund_allocation"] not in ALLOCATION_POLICIES:
                 raise ValidationFailed("اختر طريقة توزيع المرتجع")
+            if "refund_order" in rules:
+                order = b["refund_order"]
+                if (not isinstance(order, list) or len(order) != len(METHODS)
+                        or not all(m in METHODS for m in order) or len(set(order)) != len(METHODS)):
+                    raise ValidationFailed("اختار ترتيب فيه كل وسيلة رد مرة واحدة")
+            for key in rules - {"refund_order"}:
+                if type(b[key]) is not bool:
+                    raise ValidationFailed("اختار تشغيل أو إيقاف لقاعدة المرتجع")
             days = None
-            if "return_window_days" in b or not {"line_order", "refund_allocation"}.intersection(b):
+            if "return_window_days" in b or not (rules or {"line_order", "refund_allocation"}.intersection(b)):
                 try:
                     days = whole_number(b.get("return_window_days"))
                 except (TypeError, ValueError):
@@ -1816,19 +1827,30 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 if not 0 <= days <= 365:
                     raise ValidationFailed("مدة المرتجع من 0 إلى 365 يومًا")
             with db.transaction():
-                for key, before, value, action, field in (
-                        ("line_order", line_order(db, ctx.org_id), b.get("line_order"), "settings.line_order", "order"),
-                        ("return_window_days", return_window_days(db, ctx.org_id), days, "settings.return_window", "days"),
-                        ("refund_allocation", allocation_policy(db, ctx.org_id), b.get("refund_allocation"),
-                         "settings.refund_allocation", "allocation")):
-                    if value is not None:
-                        db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, ?, ?)"
-                                   " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value",
-                                   (ctx.org_id, key, str(value)))
-                        audit.record(db, ctx, action, "organization", ctx.org_id,
-                                     before={field: before}, after={field: value})
+                previous = rule_settings(db, ctx.org_id)
+                changes = [
+                    ("line_order", line_order(db, ctx.org_id), b.get("line_order"), "order"),
+                    ("return_window_days", return_window_days(db, ctx.org_id), days, "days"),
+                    ("refund_allocation", allocation_policy(db, ctx.org_id), b.get("refund_allocation"), "allocation"),
+                    *((key, previous[key], b[key], "value") for key in RULE_DEFAULTS if key in rules),
+                ]
+                for key, before, value, field in changes:
+                    if value is None:
+                        continue
+                    if isinstance(value, bool):
+                        stored = "1" if value else "0"
+                    elif isinstance(value, list):
+                        stored = ",".join(value)
+                    else:
+                        stored = str(value)
+                    db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, ?, ?)"
+                               " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value",
+                               (ctx.org_id, key, stored))
+                    action = "settings.return_window" if key == "return_window_days" else f"settings.{key}"
+                    audit.record(db, ctx, action, "organization", ctx.org_id,
+                                 before={field: before}, after={field: value})
         return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id),
-                  "refund_allocation": allocation_policy(db, ctx.org_id)})
+                  "refund_allocation": allocation_policy(db, ctx.org_id), **rule_settings(db, ctx.org_id)})
 
     # ------------------------------------------------------------- catalog
     @handler

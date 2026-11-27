@@ -345,3 +345,122 @@ class TestMixedRefund(WiringCase):
         final = self.refund(sale)
         self.assertEqual([(p["channel_id"], p["amount"]) for p in final["refund_payments"]], [(first_channel, 2000)])
         self.assertEqual(self.bal(self.paymob), 0)
+
+    def test_refund_order_is_an_owner_setting_used_on_partial_returns(self):
+        path = "/api/settings/sales"
+        default = self.call("GET", path)
+        self.assertEqual(default.get("refund_order"), ["card", "transfer", "cash", "credit"])
+        self.assertIs(default.get("refund_unreviewed_wallet"), False)
+        self.assertIs(default.get("refund_cap_mixed_credit"), True)
+        order = ["cash", "credit", "transfer", "card"]
+        self.call("PUT", path, 422, json={"refund_order": ["cash"] * 4})
+        self.call("PUT", path, 422, json={"refund_unreviewed_wallet": "false", "refund_order": order})
+        self.assertEqual(self.call("GET", path)["refund_order"], default["refund_order"])
+        self.call("PUT", path, json={"refund_order": order})
+        self.assertEqual(self.call("GET", path)["refund_order"], order)
+        sale = self.sale(cash=2000, card=2000, units=2)
+        self.assertEqual(self.split(self.refund(sale)), [("cash", 2000)])
+        self.assertEqual(self.split(self.refund(sale)), [("card", 2000)])
+
+    def test_owner_can_allow_pending_wallet_but_not_rejected_or_unconfirmed_remainder(self):
+        path = "/api/settings/sales"
+        from io import BytesIO
+
+        sale = self.sale(wallet=1000)
+        self.call("POST", f"/api/sales/{sale['id']}/attachments",
+                  files={"file": ("pending.png", BytesIO(PNG), "image/png")})
+        self.refund(sale, status=409)
+        self.call("PUT", path, json={"refund_unreviewed_wallet": True})
+        self.assertEqual(self.split(self.refund(sale)), [("transfer", 1000), ("cash", 1000)])
+
+        sale = self.sale(wallet=1000)
+        self.verify_wallet(sale, amount=600)
+        err = self.refund(sale, status=409)["error"]
+        self.assertEqual(err["details"]["max_transfer"], 600)
+        aid = self.db.one("SELECT id FROM sale_attachments WHERE sale_id=?", (sale["id"],))[0]
+        self.call("POST", f"/api/attachments/{aid}/review", json={"ok": False, "note": "التحويل لم يصل"})
+        err = self.refund(sale, status=409)["error"]
+        self.assertEqual(err["details"]["max_transfer"], 0)
+
+    def test_owner_can_allow_refund_to_store_credit_above_original_credit(self):
+        customer = self.call("POST", "/api/customers", 201, json={"name": "عميل تجربة", "credit_limit": 4000})["id"]
+        sale = self.sale(cash=1000, credit=1000, customer=customer)
+        self.refund(sale, method="credit", status=409)
+        self.call("PUT", "/api/settings/sales", json={"refund_cap_mixed_credit": False})
+        self.assertEqual(self.split(self.refund(sale, method="credit")), [("credit", 2000)])
+        self.assertEqual(self.call("GET", f"/api/customers/{customer}")["balance"], -1000)
+        self.assertEqual(self.drawer(), 11000)
+
+    def test_negative_rounding_is_recorded_without_a_zero_cash_line(self):
+        from app.catalog import service
+        from app.sales.rounding import set_step
+
+        item = service.create_item(self.db, self.ctx, {"name_en": "Rounding fixture", "pack_size": 1, "public_price": 1000})
+        self.stock(item, 6, "5")
+        set_step(self.db, self.ctx, 100)
+        sale = self.sale(cash=1000, card=1951, units=3, item=item)
+        self.assertEqual(sale["rounding"], -49)
+        self.refund(sale, method="cash")
+        self.refund(sale)
+        final = self.refund(sale)
+        self.assertEqual(self.split(final), [("card", 951)])
+        shift = CashDrawer(self.db).report(self.ctx, sale["shift_id"])
+        self.assertEqual(shift["returns_by_method"]["cash"]["count"], 1)
+        self.assertEqual(self.db.one("SELECT rounding FROM sale_returns WHERE id=?", (final["return_id"],))[0], -49)
+
+    def test_carried_credit_can_lower_debt_after_credit_limit_is_reduced(self):
+        from app.catalog import service
+
+        customer = self.call("POST", "/api/customers", 201, json={"name": "عميل تجربة", "credit_limit": 3000})["id"]
+        sale = self.sale(cash=1000, credit=1000, customer=customer)
+        self.call("PATCH", f"/api/customers/{customer}", json={"credit_limit": 100})
+        for price, status in ((2100, 409), (1500, 200)):
+            replacement = service.create_item(self.db, self.ctx, {
+                "name_en": f"Credit replacement {price}", "pack_size": 1, "public_price": price})
+            self.stock(replacement, 6, "5")
+            sid = self.draft(customer)
+            self.line(sid, replacement, units=1)
+            out = self.call("POST", f"/api/sales/{sale['id']}/exchange", status, json={
+                "new_sale_id": sid, "lines": {sale["lines"][0]["id"]: 1}, "refund_method": "original",
+                "pay_method": "credit", "reason": "استبدال تجربة"})
+            if status == 409:
+                self.assertEqual(out["error"]["code"], "credit_limit")
+                self.assertEqual(self.call("GET", f"/api/customers/{customer}")["balance"], 1000)
+            else:
+                self.assertEqual(out["sale"]["on_credit"], 500)
+                self.assertEqual(self.call("GET", f"/api/customers/{customer}")["balance"], 500)
+
+    def test_exchange_does_not_turn_unreviewed_wallet_money_into_verified_money(self):
+        self.call("PUT", "/api/settings/sales", json={"refund_unreviewed_wallet": True})
+        sale = self.sale(cash=0, wallet=2000)
+        sid = self.draft()
+        self.line(sid, self.pan, units=1)
+        out = self.call("POST", f"/api/sales/{sale['id']}/exchange", json={
+            "new_sale_id": sid, "lines": {sale["lines"][0]["id"]: 1}, "refund_method": "original",
+            "reason": "استبدال تجربة"})
+        replacement = out["sale"]
+        self.assertEqual(replacement["verified_wallet_offset"], 0)
+        self.call("PUT", "/api/settings/sales", json={"refund_unreviewed_wallet": False})
+        err = self.refund(replacement, status=409)["error"]
+        self.assertEqual(err["details"]["max_transfer"], 0)
+
+    def test_split_rows_follow_the_acting_drawer_during_a_cross_register_return(self):
+        from dataclasses import replace
+        from app.sales.service import Sales
+
+        sale = self.sale(cash=1000, card=1000)
+        with self.db.transaction():
+            self.db.execute("INSERT INTO registers (org_id,branch_id,id,name) VALUES (?,?,2,'Secondary')",
+                            (self.ctx.org_id, self.ctx.branch_id))
+        sub = replace(self.ctx, register_id=2)
+        secondary = CashDrawer(self.db).open(sub, 10000)
+        event = Sales(self.db).return_items(sub, sale["id"], {sale["lines"][0]["id"]: 1},
+                                            refund_method="original", reason="مرتجع تجربة")
+        rows = self.db.all("SELECT id,part_of,acting_shift_id,register_recorded FROM sale_returns WHERE sale_id=?",
+                           (sale["id"],))
+        self.assertEqual({(p["acting_shift_id"], p["register_recorded"]) for p in rows}, {(secondary, 1)})
+        self.assertEqual({p["part_of"] or p["id"] for p in rows}, {event["return_id"]})
+        drawer = CashDrawer(self.db)
+        self.assertEqual(drawer.report(self.ctx, sale["shift_id"])["returns_count"], 0)
+        report = drawer.report(sub, secondary)
+        self.assertEqual((report["returns_count"], report["returns_total"], report["expected_cash"]), (1, 2000, 9000))

@@ -12,6 +12,25 @@ def allocation_policy(db, org):
     return row["value"] if row and row["value"] in ALLOCATION_POLICIES else ALLOCATION_POLICIES[0]
 
 
+RULE_DEFAULTS = {
+    "refund_order": list(METHODS),
+    "refund_unreviewed_wallet": False,
+    "refund_cap_mixed_credit": True,
+}
+
+
+def rule_settings(db, org):
+    values = {r["key"]: r["value"] for r in db.all(
+        "SELECT key,value FROM org_settings WHERE org_id=?"
+        " AND key IN ('refund_order','refund_unreviewed_wallet','refund_cap_mixed_credit')", (org,))}
+    order = values.get("refund_order", "").split(",")
+    return {
+        "refund_order": order if len(order) == len(METHODS) and set(order) == set(METHODS) else list(METHODS),
+        "refund_unreviewed_wallet": values.get("refund_unreviewed_wallet") == "1",
+        "refund_cap_mixed_credit": values.get("refund_cap_mixed_credit") != "0",
+    }
+
+
 def has_multiple_tenders(db, org, sale):
     if sum(bool(sale[field]) for field in ("paid_cash", "paid_card", "paid_transfer", "on_credit")) > 1:
         return True
@@ -19,7 +38,7 @@ def has_multiple_tenders(db, org, sale):
                        " GROUP BY method,channel_id LIMIT 1 OFFSET 1", (org, sale["id"])))
 
 
-def original_capacity(db, ctx, sale, rounding_left):
+def original_capacity(db, ctx, sale, rounding_left, *, rules, verified_only=False):
     org, sid = ctx.org_id, sale["id"]
     received = {(r["method"], r["channel_id"]): r["amount"] for r in db.all(
         "SELECT method, channel_id, sum(amount) amount FROM sale_payments WHERE org_id=? AND sale_id=?"
@@ -69,11 +88,12 @@ def original_capacity(db, ctx, sale, rounding_left):
             cash_other -= take - from_card
 
     if wallets:
-        verified = transfer_state(db, org, sid, sale["paid_transfer"])["verified"]
+        state = transfer_state(db, org, sid, sale["paid_transfer"])
+        eligible = state["received"] if rules["refund_unreviewed_wallet"] and not verified_only else state["verified"]
         # A partial review does not identify which fresh wallet was confirmed.
-        short = sale["paid_transfer"] - verified
+        short = sale["paid_transfer"] - eligible
         offsets = {r["channel_id"]: r["amount"] for r in db.all(
-            "SELECT channel_id, sum(exchange_offset) amount FROM sale_payments WHERE org_id=? AND sale_id=?"
+            "SELECT channel_id, sum(verified_exchange_offset) amount FROM sale_payments WHERE org_id=? AND sale_id=?"
             " AND method='transfer' GROUP BY channel_id", (org, sid))}
         for key in wallets:
             caps[key] = max(0, caps[key] - min(short, received[key] - offsets.get(key[1], 0))
@@ -84,12 +104,12 @@ def original_capacity(db, ctx, sale, rounding_left):
 
     # Keep the unpaid positive rounding available for the return that gives it back.
     caps["cash", None] = max(0, caps["cash", None] - rounding_left)
-    return [(key, cap) for method in METHODS for key, cap in caps.items() if key[0] == method]
+    return [(key, cap) for method in rules["refund_order"] for key, cap in caps.items() if key[0] == method]
 
 
-def allocate(db, ctx, sale, amount, rounding, rounding_left, *, only=None):
+def allocate(db, ctx, sale, amount, rounding, rounding_left, *, rules, only=None):
     from .service import egp
-    caps = original_capacity(db, ctx, sale, rounding_left)
+    caps = original_capacity(db, ctx, sale, rounding_left, rules=rules)
     if only:
         caps = [(key, cap) for key, cap in caps if key[0] == only]
     total = sum(cap for _, cap in caps)
@@ -118,7 +138,7 @@ def allocate(db, ctx, sale, amount, rounding, rounding_left, *, only=None):
             left -= shares[i]
     return [{"method": method, "channel_id": channel, "amount": share + (fixed_cash if method == "cash" else 0)}
             for ((method, channel), _), share in zip(caps, shares)
-            if share or (method == "cash" and rounding)]
+            if share or (method == "cash" and rounding > 0)]
 
 
 def payments(db, org, return_id):

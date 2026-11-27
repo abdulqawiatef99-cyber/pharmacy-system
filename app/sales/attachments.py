@@ -137,10 +137,9 @@ def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None =
 
 def transfer_state(db: Database, org_id: str, sale_id: str, paid_transfer: int) -> dict:
     """What a sale's transfer proofs say: `verified` (confirmed amounts; a proof approved without an amount
-    confirms the whole transfer), `received` (what may fund a refund: the whole transfer until a reviewer
-    says otherwise, by a problem or by approving only part of it; a proof still waiting adds nothing until
-    it is approved), and the report's `state`."""
-    offset = db.one("SELECT coalesce(sum(exchange_offset),0) FROM sale_payments WHERE org_id=? AND sale_id=?"
+    confirms the whole transfer) and `received` (the amount provisionally booked, capped by rejections
+    or partial approvals). The owner's refund policy chooses which amount can fund a refund."""
+    offset = db.one("SELECT coalesce(sum(verified_exchange_offset),0) FROM sale_payments WHERE org_id=? AND sale_id=?"
                     " AND method='transfer'", (org_id, sale_id))[0]
     rows = db.all("SELECT review, confirmed_amount FROM sale_attachments WHERE org_id=? AND sale_id=?",
                   (org_id, sale_id))
@@ -179,7 +178,7 @@ def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
         "SELECT s.id, s.sale_no, s.completed_at, s.paid_transfer, s.total, s.status, u.full_name cashier,"
         " (SELECT group_concat(DISTINCT c.name) FROM sale_payments p JOIN payment_channels c ON c.id=p.channel_id"
         "   WHERE p.sale_id=s.id AND p.method='transfer') channel,"
-        " (SELECT coalesce(sum(p.exchange_offset),0) FROM sale_payments p WHERE p.sale_id=s.id"
+        " (SELECT coalesce(sum(p.verified_exchange_offset),0) FROM sale_payments p WHERE p.sale_id=s.id"
         "   AND p.org_id=s.org_id AND p.method='transfer') exchange_offset,"
         " (SELECT count(*) FROM sale_attachments a WHERE a.org_id=s.org_id AND a.sale_id=s.id) proofs,"   # #324 B8
         " (SELECT CASE WHEN sum(a.review='problem') THEN 'problem' WHEN sum(a.review='pending') THEN 'pending'"

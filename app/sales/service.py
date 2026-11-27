@@ -864,8 +864,8 @@ class Sales:
         from .attachments import listing as att_listing
         s["attachments"] = att_listing(self.db, ctx, sid)
         s["verified_wallet_offset"] = self.db.one(
-            "SELECT coalesce(sum(exchange_offset),0) FROM sale_payments WHERE sale_id=? AND org_id=?"
-            " AND method='transfer' AND exchange_offset>0", (sid, ctx.org_id))[0] if s["paid_transfer"] else 0
+            "SELECT coalesce(sum(verified_exchange_offset),0) FROM sale_payments WHERE sale_id=? AND org_id=?"
+            " AND method='transfer' AND verified_exchange_offset>0", (sid, ctx.org_id))[0] if s["paid_transfer"] else 0
         s["returns"] = [dict(r) for r in self.db.all(
             "SELECT r.id, r.part_of, r.total, r.refund_method, r.channel_id, c.name channel, r.reason, r.created_at,"
             " u.full_name by_name FROM sale_returns r LEFT JOIN users u ON u.id=r.created_by"
@@ -948,7 +948,9 @@ class Sales:
             if min(paid_cash, paid_card, on_credit) < 0:
                 raise ValidationFailed("مبالغ الدفع لا تكون بالسالب")
         offsets = [{**p, "exchange_offset": p["amount"]} for p in (_offsets or [])]
-        payments = [*offsets, *self._check_payments(ctx, payments)]
+        fresh_payments = self._check_payments(ctx, payments)
+        fresh_credit = sum(p["amount"] for p in fresh_payments if p["method"] == "credit")
+        payments = [*offsets, *fresh_payments]
         paid_cash = sum(p["amount"] for p in payments if p["method"] == "cash")
         paid_card = sum(p["amount"] for p in payments if p["method"] == "card")
         paid_transfer = sum(p["amount"] for p in payments if p["method"] == "transfer")
@@ -1035,9 +1037,9 @@ class Sales:
             if change_to_credit > KEEP_CHANGE_MAX or change_to_credit >= paid_cash:
                 raise ValidationFailed(f"الباقي اللي يتساب رصيد لحد {egp(KEEP_CHANGE_MAX)} ج وأقل من المدفوع نقدي؛"
                                        " أكتر من كده يبقى دفعة مقدمة من حساب العميل", code="keep_change_too_big")
-        if on_credit:
-            if not preview["customer_id"]:
-                raise ValidationFailed("البيع الآجل يحتاج تحديد العميل", code="customer_required")
+        if on_credit and not preview["customer_id"]:
+            raise ValidationFailed("البيع الآجل يحتاج تحديد العميل", code="customer_required")
+        if fresh_credit:
             c = preview["customer"]
             if c["balance"] + on_credit > c["credit_limit"]:
                 raise Conflict("المبلغ يتجاوز حد الآجل للعميل", code="credit_limit",
@@ -1056,7 +1058,7 @@ class Sales:
             if self._reprice_contract(ctx, sid):
                 raise Conflict("تغيّر خصم التعاقد على هذه الفاتورة، راجع الإجمالي الجديد ثم أتمم البيع",
                                code="price_changed", details={"reason": "contract"})
-            if on_credit:            # #143: again inside the write lock, so two cashiers cannot pass it together
+            if fresh_credit:         # #143: again inside the write lock, so two cashiers cannot pass it together
                 c = self.db.one("SELECT credit_limit FROM customers WHERE id=? AND org_id=?",
                                 (s["customer_id"], ctx.org_id))
                 bal = self.balance(ctx, s["customer_id"])
@@ -1133,12 +1135,14 @@ class Sales:
             from ..finance import money
             for p in payments:
                 carried = "source_account" in p
-                self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount, exchange_offset)"
-                                " VALUES (?,?,?,?,?,?,?)", (new_id(), ctx.org_id, sid, p["method"],
-                                                            p["channel_id"], p["amount"], p.get("exchange_offset", 0)))
+                verified = p.get("verified_exchange_offset", 0)
+                self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount,"
+                                " exchange_offset, verified_exchange_offset) VALUES (?,?,?,?,?,?,?,?)",
+                                (new_id(), ctx.org_id, sid, p["method"], p["channel_id"], p["amount"],
+                                 p.get("exchange_offset", 0), verified))
                 if carried:
                     money.carry_sale_payment(self.db, ctx, p["method"], p["channel_id"], p["amount"],
-                                             p["source_account"], sid, note=f"استبدال فاتورة {no}")
+                                             p["source_account"], sid, note=f"استبدال فاتورة {no}", verified=verified)
                 elif p["method"] in money.METHODS:
                     money.receive(self.db, ctx, p["method"], p["channel_id"], p["amount"], "sale",
                                   ref_type="sale", ref_id=sid, note=f"فاتورة {no}")
@@ -1633,6 +1637,7 @@ class Sales:
             from ..finance import money
             from . import refunds
 
+            rules = refunds.rule_settings(self.db, ctx.org_id)
             cash_override = False
             if refund_method in ("cash", "card", "transfer"):
                 # a refund to the card follows the same cap: money never received cannot go back to a card either
@@ -1649,8 +1654,9 @@ class Sales:
                 if s["paid_transfer"]:
                     from .attachments import transfer_state
                     state = transfer_state(self.db, ctx.org_id, sid, s["paid_transfer"])
-                    unreceived = state["verified"] < s["paid_transfer"]
-                    received -= s["paid_transfer"] - state["verified"]
+                    eligible = state["received"] if rules["refund_unreviewed_wallet"] else state["verified"]
+                    unreceived = eligible < s["paid_transfer"]
+                    received -= s["paid_transfer"] - eligible
                 done = {r["refund_method"]: r["t"] for r in self.db.all(
                     "SELECT refund_method, coalesce(sum(total), 0) t FROM sale_returns WHERE sale_id=? AND org_id=?"
                     " AND refund_method IN ('cash', 'card', 'transfer') GROUP BY refund_method", (sid, ctx.org_id))}
@@ -1661,7 +1667,7 @@ class Sales:
                 # Cash for an invoice paid by card is a rare real exception: owner or manager, with the reason.
                 by_cash = (s["paid_cash"] or 0) - done.get("cash", 0)
                 if refund_method in ("card", "transfer"):
-                    capacity = dict(refunds.original_capacity(self.db, ctx, s, 0))
+                    capacity = dict(refunds.original_capacity(self.db, ctx, s, 0, rules=rules))
                     by_card = sum(room for (method, _), room in capacity.items() if method == "card")
                 if refund_method == "transfer":
                     channels = [ch for method, ch in capacity if method == "transfer"]
@@ -1697,8 +1703,9 @@ class Sales:
                     raise Conflict(f"هذا الجزء من الفاتورة كان آجلًا على حساب العميل فلا يُرد {how} (الحد الأقصى"
                                    f" {egp(can)} ج)؛ أعد الباقي على حساب العميل",
                                    code="cash_refund_exceeds_paid", details={"max_cash": can, "refund": refund})
-            if refund_method == "credit" and refunds.has_multiple_tenders(self.db, ctx.org_id, s):
-                limit = dict(refunds.original_capacity(self.db, ctx, s, 0))["credit", None]
+            if (refund_method == "credit" and rules["refund_cap_mixed_credit"]
+                    and refunds.has_multiple_tenders(self.db, ctx.org_id, s)):
+                limit = dict(refunds.original_capacity(self.db, ctx, s, 0, rules=rules))["credit", None]
                 if refund > limit:
                     raise Conflict(f"المبلغ المتاح للرد على حساب العميل {egp(limit)} ج",
                                    code="refund_exceeds_method", details={"max_credit": limit, "refund": refund})
@@ -1706,7 +1713,7 @@ class Sales:
             if refund_method in ("original", "card"):
                 payments = refunds.allocate(self.db, ctx, s, refund, rounding_back,
                                              0 if emptied else max(0, s["rounding"]),
-                                             only="card" if refund_method == "card" else None)
+                                             rules=rules, only="card" if refund_method == "card" else None)
                 # A zero-value return still needs an event and its stock history.
                 if not payments:
                     payments = [{"method": "cash" if refund_method == "original" else refund_method,
@@ -1719,10 +1726,13 @@ class Sales:
             for p in payments:
                 p["channel"] = names.get(p["channel_id"])
             if rounding_back and refund_method == "original":
-                # Store the invoice rounding on the cash row, which also anchors the audit entry.
+                # Keep rounding with cash when present. Otherwise the first tender anchors the audit.
                 primary = next((p for p in payments if p["method"] == "cash"), payments[0])
             else:
                 primary = payments[0]
+            verified_wallet = {}
+            if _exchange and rules["refund_unreviewed_wallet"] and any(p["method"] == "transfer" for p in payments):
+                verified_wallet = dict(refunds.original_capacity(self.db, ctx, s, 0, rules=rules, verified_only=True))
             rid, created_at = new_id(), _now()
             if refund_method == "cash" or any(p["method"] == "cash" and p["amount"] for p in payments):
                 acting_shift = cash.require_open_shift(self.db, ctx, s["branch_id"])
@@ -1779,6 +1789,9 @@ class Sales:
         result = {"return_id": rid, "refund": refund, "change_back": change_back, "refund_payments": payments}
         if _exchange:
             result["_electronic"] = electronic
+            result["_verified_wallet"] = {p["id"]: (min(p["amount"], verified_wallet.get(("transfer", p["channel_id"]), 0))
+                                                   if rules["refund_unreviewed_wallet"] else p["amount"])
+                                          for p in payments if p["method"] == "transfer"}
         return result
 
     def find_for_return(self, ctx: Context, q: str, limit: int = 20) -> list[dict]:
@@ -1931,13 +1944,16 @@ class Sales:
                                         (take, ctx.org_id, part["id"]))
                     if method in money.METHODS:
                         remaining = take
+                        verified_left = ret["_verified_wallet"].get(part["id"], 0)
                         for account, posted in ret["_electronic"].get(part["id"], []):
                             kept = min(remaining, posted)
                             money.post_tender_refund(self.db, ctx, sid, method, channel, account, posted,
                                                      return_id=part["id"], note=reason, offset=kept)
                             if kept:
+                                verified = min(kept, verified_left)
                                 offsets.append({"method": method, "channel_id": channel, "amount": kept,
-                                                "source_account": account})
+                                                "source_account": account, "verified_exchange_offset": verified})
+                                verified_left -= verified
                                 remaining -= kept
                     elif take:
                         offsets.append({"method": method, "channel_id": None, "amount": take})

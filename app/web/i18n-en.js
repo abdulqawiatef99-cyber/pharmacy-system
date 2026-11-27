@@ -1,6 +1,15 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"قواعد رد المدفوعات": "Refund rules",
+"حسب الأولوية": "By priority",
+"ترتيب رد وسائل الدفع": "Refund tender order",
+"الأولوية 0": "Priority 0",
+"السماح برد تحويل المحفظة قبل مراجعته": "Allow wallet refunds before transfer review",
+"حدّ الرد على حساب العميل في الدفع المختلط هو الجزء الآجل": "Cap mixed-payment store credit at the original credit amount",
+"إعدادات رد المدفوعات للمالك فقط": "Only the owner can change refund rules",
+"اختار ترتيب فيه كل وسيلة رد مرة واحدة": "Choose an order with each refund method exactly once",
+"اختار تشغيل أو إيقاف لقاعدة المرتجع": "Choose whether to enable the refund rule",
 "تسوية استبدال": "Exchange offset",
 "الإلغاء والمرتجعات في الشيفت": "Voids and refunds in the shift",
 "مفيش إلغاء ولا مرتجعات في الشيفت ده": "No voids or refunds in this shift",

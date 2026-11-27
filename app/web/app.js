@@ -8809,11 +8809,22 @@ async function viewUsers() {
       <button class="btn small secondary" data-rsave="${r.code}">احفظ</button></span></label>`).join("")}</div></section>
   <section class="panel"><h2>مدة المرتجع</h2>
     <form id="retWin" class="row"><label class="f">عدد الأيام <input class="narrow" type="number" min="0" max="365" name="days" value="${sales.return_window_days}"></label>
-    <label class="f">توزيع مرتجع الدفع المختلط<select name="allocation">
-      <option value="original_order" ${sales.refund_allocation === "original_order" ? "selected" : ""}>البطاقة، ثم المحافظ، ثم النقدي، ثم الحساب</option>
-      <option value="proportional" ${sales.refund_allocation === "proportional" ? "selected" : ""}>بنسبة المبلغ المتبقي في كل وسيلة</option>
-    </select></label><button class="btn small secondary">احفظ</button></form>
-    <p class="muted">بعد هذه المدة يحتاج المرتجع إلى المالك (أو من منحه المالك هذه الصلاحية "مرتجع بعد مدة المرتجع").</p></section>`;
+    <button class="btn small secondary">احفظ</button></form>
+    <p class="muted">بعد هذه المدة يحتاج المرتجع إلى المالك (أو من منحه المالك هذه الصلاحية "مرتجع بعد مدة المرتجع").</p></section>
+  ${ME.user.role === "owner" ? `<section class="panel"><h2>قواعد رد المدفوعات</h2>
+    <form id="refundRules">
+      <label class="f">توزيع مرتجع الدفع المختلط<select name="allocation">
+        <option value="original_order" ${sales.refund_allocation === "original_order" ? "selected" : ""}>حسب الأولوية</option>
+        <option value="proportional" ${sales.refund_allocation === "proportional" ? "selected" : ""}>بنسبة المبلغ المتبقي في كل وسيلة</option>
+      </select></label>
+      <fieldset class="mt"><legend>ترتيب رد وسائل الدفع</legend><div class="row">
+        ${sales.refund_order.map((method, i) => `<label class="f">الأولوية ${i + 1}<select name="tender">
+          ${Object.entries(REFUND_METHOD_LABELS).map(([key, label]) => `<option value="${key}" ${method === key ? "selected" : ""}>${esc(label)}</option>`).join("")}
+        </select></label>`).join("")}</div></fieldset>
+      <label class="chk mt"><input type="checkbox" name="unreviewed" ${sales.refund_unreviewed_wallet ? "checked" : ""}> السماح برد تحويل المحفظة قبل مراجعته</label>
+      <label class="chk mt"><input type="checkbox" name="capCredit" ${sales.refund_cap_mixed_credit ? "checked" : ""}> حدّ الرد على حساب العميل في الدفع المختلط هو الجزء الآجل</label>
+      <button class="btn small secondary mt">احفظ</button>
+    </form></section>` : ""}`;
   document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/users/${tr.dataset.go}`; }));
   $("#uNew").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -8829,9 +8840,30 @@ async function viewUsers() {
   }));
   $("#retWin").addEventListener("submit", async (e) => {
     e.preventDefault();
-    try { await api("/api/settings/sales", { method: "PUT", body: { return_window_days: +e.target.days.value, refund_allocation: e.target.allocation.value } }); toast("تم الحفظ"); }
+    try { await api("/api/settings/sales", { method: "PUT", body: { return_window_days: +e.target.days.value } }); toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });
+  const refundRules = $("#refundRules");
+  if (refundRules) {
+    const tenders = [...refundRules.querySelectorAll('[name="tender"]')];
+    let order = tenders.map((select) => select.value);
+    tenders.forEach((select, i) => select.addEventListener("change", () => {
+      const other = order.indexOf(select.value);
+      tenders[other].value = order[i];
+      order = tenders.map((input) => input.value);
+    }));
+    refundRules.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fields = e.target.elements;
+      try {
+        await api("/api/settings/sales", { method: "PUT", body: {
+          refund_allocation: fields.allocation.value, refund_order: order,
+          refund_unreviewed_wallet: fields.unreviewed.checked, refund_cap_mixed_credit: fields.capCredit.checked,
+        } });
+        toast("تم الحفظ");
+      } catch (err) { toast(err.message, true); }
+    });
+  }
 }
 
 async function viewUser(id) {
