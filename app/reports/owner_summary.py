@@ -45,6 +45,23 @@ def _cash_refunds_of(db: Database, s) -> list[dict]:
         (s["id"], s["org_id"]))]
 
 
+def tab_losses_of(db: Database, s) -> list[dict]:
+    """SEC8: per employee, the sale tabs closed with items and the items taken off a tab during this shift
+    (audit rows on the shift, read through the entity index)."""
+    rows = db.all(
+        "SELECT a.user_id, u.full_name, a.action, count(*) n, coalesce(sum(json_extract(a.after_json,'$.value')),0) v"
+        " FROM audit_log a LEFT JOIN users u ON u.id=a.user_id WHERE a.org_id=? AND a.entity_type='cash_shift'"
+        " AND a.entity_id=? AND a.action IN ('sale.tab_discarded','sale.line_removed') GROUP BY a.user_id, a.action",
+        (s["org_id"], s["id"]))
+    out: dict = {}
+    for r in rows:
+        e = out.setdefault(r["user_id"], {"user_id": r["user_id"], "by": r["full_name"] or "",
+                                          "discarded": 0, "discarded_value": 0, "removed": 0, "removed_value": 0})
+        key = "discarded" if r["action"] == "sale.tab_discarded" else "removed"
+        e[key], e[key + "_value"] = int(r["n"]), int(r["v"])
+    return sorted(out.values(), key=lambda e: -(e["discarded_value"] + e["removed_value"]))
+
+
 def day_totals(db: Database, ctx: Context, day=None, branch_id: str | None = None) -> dict:
     """Voids and cash refunds of one local day (default today) in the branch, over every shift."""
     ctx.require("cash.see_expected")
@@ -120,6 +137,14 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
                          f" — السبب: {(e['reason'] or '').strip()}")
     else:
         lines.append("مفيش إلغاء ولا مرتجع نقدي في الشيفت ده")
+    losses = tab_losses_of(db, shift)
+    for e in losses:
+        parts = []
+        if e["discarded"]:
+            parts.append(f"تبويبات اتقفلت بأصناف {e['discarded']} بـ {_egp(e['discarded_value'])} ج")
+        if e["removed"]:
+            parts.append(f"أصناف اتشالت من الفاتورة {e['removed']} بـ {_egp(e['removed_value'])} ج")
+        lines.append(f"• {e['by']}: " + " · ".join(parts))
     lines.append(f"إجمالي اليوم {the_day.isoformat()} (كل الشيفتات): إلغاء {day['voids']} فاتورة بـ {_egp(day['voids_total'])} ج · "
                  f"مرتجع نقدي {day['cash_refunds']} بـ {_egp(day['cash_refunds_total'])} ج")
     if out:
@@ -127,5 +152,5 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
     else:
         lines.append("مفيش أصناف خلصت من اللي بيتباع")
     return {"text": "\n".join(lines), "difference": diff, "out_of_stock": [x["n"] for x in out],
-            "voids": voids, "cash_refunds": refunds, "day": day, "day_date": the_day.isoformat(),
+            "voids": voids, "cash_refunds": refunds, "tab_losses": losses, "day": day, "day_date": the_day.isoformat(),
             "register_name": r["register_name"]}
