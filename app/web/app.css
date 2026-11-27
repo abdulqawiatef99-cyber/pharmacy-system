@@ -75,6 +75,7 @@ tr.has-err { background: var(--err-bg); }
 input.low { border: 2px dashed var(--warn); background: var(--warn-bg); }
 input.inferred { font-style: italic; }
 input.ai { border-color: var(--ai); }
+[aria-invalid="true"], [aria-invalid="true"]:focus { border: 2px solid var(--err) !important; background: var(--err-bg); }
 .review { display: grid; grid-template-columns: minmax(280px, 38%) 1fr; gap: 16px; align-items: start; }
 .doc { position: sticky; top: 70px; height: calc(100vh - 100px); overflow: auto; }
 .doc img { width: 100%; height: auto; display: block; }
@@ -436,6 +437,7 @@ fieldset.lblp legend { padding: 0 6px; font-weight: 700; } fieldset.lblp p { gri
 .tour-bub .tour-n { margin: 0; }
 .tour-bub .tour-btns { gap: 8px; align-items: center; flex-wrap: wrap; }
 .tour-bub .tour-btns .link { margin-inline-start: auto; }
+.tour-bub .tour-x { position: absolute; top: 4px; inset-inline-end: 8px; font-size: 1rem; text-decoration: none; }
 .tour-arrow { position: absolute; left: var(--ax, 50%); width: 14px; height: 14px; margin-left: -7px; background: var(--panel);
   border: 2px solid var(--brand); transform: rotate(45deg); }
 .tour-bub[data-side="up"] .tour-arrow { top: -9px; border-right: 0; border-bottom: 0; }

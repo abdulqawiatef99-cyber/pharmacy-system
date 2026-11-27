@@ -134,6 +134,15 @@ class Purchasing:
         file_id, _ = self._store_file(ctx, data, filename, mime)
         return self._create_from_extraction(ctx, extracted, kind, file_id, supplier_id)
 
+    def duplicate_of(self, ctx: Context, supplier_id: str | None, invoice_no: str | None) -> str | None:
+        """The live invoice already holding this supplier's number, if any (the check update_header makes)."""
+        ctx.require("purchases.create")
+        if not supplier_id or not invoice_no:
+            return None
+        r = self.db.one("SELECT id FROM purchase_invoices WHERE org_id=? AND supplier_id=? AND invoice_no=?"
+                        " AND status<>'cancelled'", (ctx.org_id, supplier_id, invoice_no))
+        return r["id"] if r else None
+
     def create_manual(self, ctx: Context, *, supplier_id: str | None = None) -> str:
         ctx.require("purchases.create")
         from ..sales.service import local_today       # update 1 (owner): the supplier invoice date starts as today
