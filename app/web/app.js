@@ -3364,10 +3364,16 @@ function viewImport() {
       // working, and this screen shows how far it got
       const fd = new FormData(form); fd.set("background", "1");
       go.disabled = true;
-      const { job } = await api("/api/imports", { method: "POST", form: fd });
-      let j;
+      let job;
+      try { ({ job } = await api("/api/imports", { method: "POST", form: fd })); }
+      catch (er) { if (er.code === "import_running" && er.details?.job) job = er.details.job; else throw er; }   // follow the running one
+      let j, misses = 0;
       for (;;) {
-        j = await api(`/api/imports/jobs/${encodeURIComponent(job)}`);
+        try { j = await api(`/api/imports/jobs/${encodeURIComponent(job)}`); misses = 0; }
+        catch (er) {                                   // a dropped poll never loses the job: try again (review P2)
+          if (er.code || ++misses > 30) throw er;     // a server answer (gone, refused) ends it; no answer is retried
+          await new Promise((res) => setTimeout(res, 2000)); continue;
+        }
         if (j.status !== "running" || !form.isConnected) break;
         go.textContent = j.total ? `بيحلل… ${j.done} من ${j.total} سطر` : "بيقرا الملف…";
         await new Promise((res) => setTimeout(res, 1000));

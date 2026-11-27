@@ -92,6 +92,16 @@ class TestImportOffTheLoop(APICase):
         self.assertIn(j["error"]["code"], ("missing_columns", "mapping_required"))
         self.assertIn("preview", j["error"]["details"])            # the screen draws the same help from it
 
+    def test_a_second_job_of_the_same_person_names_the_running_one(self):
+        self.http_login()
+        with Spy("analyze", delay=1.5):
+            first = self.post(csv(2), background="1").json()["job"]
+            again = self.post(csv(2, start=10), background="1")
+            self.assertEqual(again.status_code, 409, again.text)
+            self.assertEqual(again.json()["error"]["details"]["job"], first)
+            self.wait(first)
+        self.assertEqual(self.post(csv(2, start=20), background="1").status_code, 202)
+
     def test_a_job_is_read_only_by_whoever_started_it(self):
         self.http_login()
         job = self.post(csv(3), background="1").json()["job"]
@@ -166,6 +176,19 @@ class TestDuplicateLookupUsesTheIndex(APICase):
         plan = " | ".join(r[3] for r in sqlite3.connect(self.db.path).execute(
             "EXPLAIN QUERY PLAN " + dimp_svc.SAME_NAME_ANY_MAKER, ("o", base, base + "|m:", base + "|m;")))
         self.assertNotIn("SCAN items", plan)
+
+    def test_the_range_holds_every_maker_and_nothing_else(self):
+        o = self.ctx.org_id
+        base = "range base"
+        with self.db.transaction():
+            for i, key in enumerate((base + "|m:zeta", base + "|mx", base + "x")):
+                self.db.execute("INSERT INTO items (id, org_id, name_en, name_norm, dedupe_key) VALUES (?,?,?,?,?)",
+                                (f"rg-{i}", o, key, key, key))
+        got = self.db.one(dimp_svc.SAME_NAME_ANY_MAKER, (o, base, base + "|m:", base + "|m;"))
+        self.assertEqual(got["id"], "rg-0")
+        with self.db.transaction():
+            self.db.execute("DELETE FROM items WHERE id='rg-0'")
+        self.assertIsNone(self.db.one(dimp_svc.SAME_NAME_ANY_MAKER, (o, base, base + "|m:", base + "|m;")))
 
     def test_same_name_with_a_maker_is_still_found(self):
         from app.catalog import service as cat

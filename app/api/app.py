@@ -2084,16 +2084,16 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     # loses the job, never half a run). One running job per person; a finished job is kept for an hour.
     import_jobs: dict[str, dict] = {}
     import_jobs_lock = threading.Lock()
-    import_job_tasks: set = set()
 
     def _start_import_job(ctx, data: bytes, name: str, kwargs: dict) -> str:
         now = time.monotonic()
         with import_jobs_lock:
             for k in [k for k, j in import_jobs.items() if j["status"] != "running" and now - j["at"] > 3600]:
                 import_jobs.pop(k)
-            if any(j["status"] == "running" and j["org_id"] == ctx.org_id and j["user_id"] == ctx.user_id
-                   for j in import_jobs.values()):
-                raise Conflict("فيه ملف لسه بيتحلل، استنى لما يخلص", code="import_running")
+            running = next((k for k, j in import_jobs.items() if j["status"] == "running"
+                            and j["org_id"] == ctx.org_id and j["user_id"] == ctx.user_id), None)
+            if running:      # the screen follows that job instead (review P2)
+                raise Conflict("فيه ملف لسه بيتحلل، استنى لما يخلص", code="import_running", details={"job": running})
             job_id = new_id()
             job = import_jobs[job_id] = {"org_id": ctx.org_id, "user_id": ctx.user_id, "status": "running",
                                          "done": 0, "total": None, "run_id": None, "error": None, "at": now}
@@ -2112,9 +2112,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 job.update(status="failed", error={"code": "internal", "message": "حدث خطأ غير متوقع", "details": {}})
             finally:
                 job["at"] = time.monotonic()
-        task = asyncio.get_running_loop().run_in_executor(None, run)
-        import_job_tasks.add(task)
-        task.add_done_callback(import_job_tasks.discard)
+        # its own thread: never tied to the request's event loop (nor waited for when that loop ends)
+        threading.Thread(target=run, name=f"import-{job_id[:8]}", daemon=True).start()
         return job_id
 
     @handler
