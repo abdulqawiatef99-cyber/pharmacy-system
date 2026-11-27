@@ -269,8 +269,6 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .tab .x { color: var(--muted); padding: 0 4px; border-radius: 6px; } .tab .x:hover { background: var(--err-bg); color: var(--err); }
 .tab.add { color: var(--brand); font-weight: 700; border-style: dashed; }
 kbd { font: inherit; font-size: .75rem; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; padding: 0 5px; background: var(--bg); color: var(--ink); }
-.pos { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 400px); gap: 16px; align-items: start; }
-@media (max-width: 1000px) { .pos { grid-template-columns: 1fr; } }
 .pos-main { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 input.big { min-height: 54px; font-size: 1.25rem; border: 2px solid var(--brand); }
 .results { display: flex; flex-direction: column; gap: 6px; }
@@ -293,7 +291,6 @@ input.big { min-height: 54px; font-size: 1.25rem; border: 2px solid var(--brand)
 .disc2 .dfield input { width: 4.5em; min-width: 0; }
 td.num { direction: ltr; text-align: right; font-variant-numeric: tabular-nums; }
 .keys { font-size: .8125rem; color: var(--muted); }
-.pos-side { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 76px; }
 .seg2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--bg); border-radius: 12px; }
 .seg2 button { min-height: 42px; border: 0; border-radius: 9px; background: transparent; cursor: pointer; color: var(--ink); }
 .seg2 button.on { background: var(--panel); color: var(--brand); font-weight: 700; box-shadow: 0 1px 2px rgba(0,0,0,.15); }
@@ -469,3 +466,108 @@ th[data-sort]::after { content: " " attr(data-dir); }
 .spOpt small { color: var(--muted); }
 .spOpt.on, .spOpt:hover { background: var(--line-soft); }
 .spNone { padding: 6px 10px; font-size: .875rem; }
+
+/* Compact screen tables keep the selected font scale and touch targets. */
+#app { --table-small: max(13px, .8125rem); }
+@media screen {
+  #app :is(th, td) { padding-block: 4px; line-height: 1.35; }
+  #app th, #app table :is(.muted, .small, .badge, .chip, .raw, .iname-ar, .lno, kbd, small) {
+    font-size: var(--table-small);
+  }
+  #app table :is(.badge, .chip) { padding-block: 1px; }
+  #app table :is(button, .btn) { min-height: 32px; }
+  #app table .btn.small { padding: 3px 8px; }
+  #app table :is(input:not([type=checkbox], [type=radio]), select) {
+    min-height: 32px; padding-block: 3px; font-size: max(13px, 1em);
+  }
+  #app table .qty.mix { margin-top: 2px; font-size: max(13px, .9em); }
+}
+
+/* The action footer is outside the scrolling details and the line tables. */
+.invoice-workspace {
+  --invoice-sticky-top: calc(var(--invoice-header, 0px) + 8px);
+  --invoice-bottom: 12px;
+  --invoice-space: calc(100dvh - var(--invoice-header, 0px) - var(--invoice-alerts, 0px) - 16px - var(--invoice-bottom));
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 12px; align-items: start;
+}
+body:has(#dhikrBar) .invoice-workspace { --invoice-bottom: max(12px, 1.6em); }
+.invoice-main { min-width: 0; }
+.invoice-side {
+  position: sticky; inset-block-start: var(--invoice-sticky-top); z-index: 2;
+  display: flex; flex-direction: column; max-block-size: max(120px, var(--invoice-space));
+  margin: 0; padding: 0;
+}
+.invoice-side-scroll { overflow: auto; overscroll-behavior: contain; min-block-size: 0; padding: 10px; }
+.invoice-actions { flex: none; padding: 8px 10px; border-block-start: 1px solid var(--line); }
+.invoice-lines { overflow: auto; overscroll-behavior: contain; scroll-padding-block-start: 2rem; }
+.invoice-lines th { z-index: 1; }
+
+.pos-work { display: flex; flex-direction: column; gap: 6px; max-block-size: max(360px, var(--invoice-space)); }
+.pos-work .tabs { flex: none; max-block-size: 6rem; margin: 0; overflow: auto; }
+.pos-work .tab, #pTabs .tab { padding-block: 4px; min-height: 32px; }
+.pos-work > label { flex: none; }
+.pos-work #posQ { min-height: 44px; padding-block: 5px; }
+.pos-work #posRes { flex: none; max-block-size: 24dvh; overflow: auto; }
+.pos-work #posRes:empty, #posSafety:empty, #qaErr:empty { display: none; }
+#posCart { display: flex; flex-direction: column; min-block-size: 100px; margin: 0; padding: 8px; }
+#posCart .cart { min-inline-size: 740px; }
+#posCart > p { flex: none; margin: 0 0 4px; font-size: var(--table-small); }
+#posCart .dnotes { flex: none; max-block-size: 20dvh; overflow: auto; display: block; }
+.pos-side { block-size: max(120px, var(--invoice-space)); }
+.pos-side .invoice-side-scroll { flex: 1 1 auto; }
+.pos-side .invoice-actions .btn { margin: 0; min-height: 48px; }
+.pos-side .seg2 button, .pos-side .paym button { min-height: 36px; }
+.pos-side :is(input:not([type=checkbox], [type=radio]), select) { min-height: 36px; padding-block: 4px; }
+.pos-side p { margin-block: 6px; }
+.pos-side .mt { margin-block-start: 6px; }
+.pos-side .sum { padding-block: 3px; }
+.pos-side .sum.due b { font-size: 1.8rem; }
+.pos-payment { margin-block-start: 8px; padding-block-start: 8px; border-block-start: 1px solid var(--line); }
+
+.purchase-workspace { grid-template-columns: minmax(0, 1fr) minmax(240px, 280px); }
+#pTabs { margin-block-end: 8px; }
+.purchase-workspace :is(.purchase-header, #qa, .purchase-lines-panel) { padding: 10px; margin-block-end: 10px; }
+.purchase-workspace :is(.purchase-fields, #qa .row) { gap: 6px 10px; }
+.purchase-header h1 { margin-block-end: 4px; font-size: 1.25rem; }
+.purchase-fields > label { flex: 0 1 8rem; min-inline-size: 0; }
+.purchase-fields > label:has(.spHide, #supType, [data-h="declared_total"], #paySrc) { flex-basis: 10.5rem; }
+.purchase-workspace :is(.purchase-fields, #qa) :is(input, select) { min-height: 34px; padding-block: 3px; }
+.purchase-fields :is(input, select), .purchase-fields .sp { inline-size: 100%; min-inline-size: 0; }
+.purchase-fields .f, #qa .f { font-size: max(13px, .875rem); line-height: 1.3; }
+#puDeclaredHint { display: block; margin-block-start: 4px; font-size: var(--table-small); }
+#qa h2 { margin-block-end: 5px; }
+#qa .narrow { inline-size: 5.5rem; }
+#qa .grow { min-inline-size: 12rem; }
+#qaRes:empty, #qaPicked:empty { display: none; }
+.purchase-summary .totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.purchase-summary .totals div { padding: 6px 8px; }
+.purchase-summary .invoice-actions { gap: 6px; }
+.purchase-summary .invoice-actions .btn { padding-block: 4px; padding-inline: 8px; min-height: 32px; }
+.purchase-workspace .invoice-lines { max-block-size: max(200px, calc(var(--invoice-space) - 13rem)); }
+.purchase-workspace .legend { margin-block: 0 5px; font-size: var(--table-small); }
+.purchase-workspace .doc { top: var(--invoice-sticky-top); max-block-size: var(--invoice-space); }
+.lines [data-taxmode] { max-inline-size: 9rem; }
+.lines td[data-label]::before { font-size: var(--table-small); }
+
+@media screen and (max-width: 760px) {
+  html:has(.invoice-workspace) { scroll-padding-block-end: calc(min(38dvh, 16rem) + 2rem); }
+  .invoice-workspace {
+    --invoice-dock-size: min(38dvh, 16rem);
+    grid-template-columns: minmax(0, 1fr); padding-block-end: var(--invoice-dock-size);
+  }
+  .invoice-side {
+    position: fixed; inset: auto 10px var(--invoice-bottom);
+    max-block-size: var(--invoice-dock-size); box-shadow: 0 -2px 8px rgb(0 0 0 / 15%);
+  }
+  .pos-side { block-size: var(--invoice-dock-size); }
+  .pos-work { max-block-size: max(280px, calc(var(--invoice-space) - var(--invoice-dock-size))); }
+  .purchase-workspace .invoice-lines { max-block-size: max(180px, calc(var(--invoice-space) - var(--invoice-dock-size))); }
+}
+
+@media print {
+  .invoice-workspace { display: block; padding: 0; }
+  .invoice-side, .pos-work, .invoice-side-scroll, .invoice-lines, .purchase-workspace .invoice-lines {
+    position: static; block-size: auto; max-block-size: none; overflow: visible;
+  }
+  .invoice-lines th { position: static; }
+}

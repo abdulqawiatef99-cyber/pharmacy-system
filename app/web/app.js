@@ -1528,6 +1528,24 @@ function invoiceCardButton(attribute, value, key) {
 
 function lineIssues(lineId) { return CUR.issues.filter((i) => i.line_id === lineId); }
 
+let invoiceChromeObserver;
+function sizeInvoiceLayout() {
+  if (invoiceChromeObserver) return;
+  const header = $("#topbar"), alerts = [$("#staleBar"), $("#stockAlert"), $("#backupAlert")];
+  const fit = () => {
+    app.style.setProperty("--invoice-header", `${header.offsetHeight}px`);
+    app.style.setProperty("--invoice-alerts", `${alerts.reduce((sum, el) => sum + el.offsetHeight, 0)}px`);
+  };
+  invoiceChromeObserver = new ResizeObserver(fit);
+  [header, ...alerts].forEach((el) => invoiceChromeObserver.observe(el));
+  fit();
+}
+
+function keepInvoiceScroll(selector) {
+  const pane = $(selector), top = pane?.scrollTop ?? 0, left = pane?.scrollLeft ?? 0;
+  return () => $(selector)?.scrollTo(left, top);
+}
+
 function renderInvoice(keepPicker = true) {
   const { invoice: inv, lines, issues } = CUR;
   const draft = inv.status === "draft";
@@ -1545,15 +1563,19 @@ function renderInvoice(keepPicker = true) {
 
   const diff = inv.declared_total != null && inv.computed_total != null ? inv.declared_total - inv.computed_total : null;
   const totalErr = issues.some((i) => i.code === "total_mismatch" && !i.acknowledged);
+  const restoreLines = keepInvoiceScroll(`.invoice-lines[data-invoice="${CSS.escape(inv.id)}"]`);
+  const restoreSummary = keepInvoiceScroll(`.purchase-summary[data-invoice="${CSS.escape(inv.id)}"] .invoice-side-scroll`);
   app.innerHTML = `
+  <div class="invoice-workspace purchase-workspace">
+  <div class="invoice-main">
   <nav class="tabs" id="pTabs" aria-label="فواتير الشراء المفتوحة"></nav>
-  <section class="panel">
+  <section class="panel purchase-header">
     <div class="row between">
       <h1>فاتورة شراء ${inv.serial_no ? `<span class="muted" title="المسلسل في البرنامج">مسلسل ${esc(inv.serial_no)}</span> ` : ""}<span class="badge ${STATUS[inv.status][1]}">${STATUS[inv.status][0]}</span>
         ${inv.extraction_method === "ai_vision" ? `<span class="badge b-ai">قراءة آلية — راجع كل القيم</span>` : ""}</h1>
       <a href="#/purchases">رجوع للفواتير</a>
     </div>
-    <div class="row">
+    <div class="row purchase-fields">
       <label class="f">المورد <select data-h="supplier_id" class="spHide" tabindex="-1" ${draft ? "" : "disabled"}>
         <option value="">— اختر —</option></select></label>
       <label class="f">نوع المورد <span class="seg2 small" id="supType"></span></label>
@@ -1563,8 +1585,7 @@ function renderInvoice(keepPicker = true) {
       ${draft ? '<input type="date" id="puDatePicker" hidden><button class="btn small secondary" type="button" id="puDateOpen">التقويم</button>' : ""}
       <label class="f">تاريخ الإدخال على السيستم <input id="pinEntered" value="${esc(cairoWhen(inv.created_at))}" readonly disabled></label>
       ${inv.approved_at ? `<label class="f">تاريخ الاعتماد <input id="pinApproved" value="${esc(cairoWhen(inv.approved_at))}" readonly disabled></label>` : ""}
-      <label class="f">إجمالي فاتورة المورد (من الورقة) (ج) <input data-h="declared_total" autocomplete="off" type="number" step="0.01" min="0" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}>
-        <small class="muted">اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف</small>
+      <label class="f">إجمالي فاتورة المورد (من الورقة) (ج) <input data-h="declared_total" aria-describedby="puDeclaredHint" autocomplete="off" type="number" step="0.01" min="0" value="${money(inv.declared_total)}" ${draft ? "" : "disabled"}>
         ${diff == null ? "" : diff === 0 ? `<small class="badge b-ok">✓ مطابق تمامًا</small>` : `<small class="badge ${totalErr ? "b-err" : "b-warn"}">الفرق ${money(Math.abs(diff))} ج</small>`}</label>
       <label class="f">خصم إضافي على الفاتورة (ج) <input data-h="extra_discount" autocomplete="off" type="number" step="0.01" value="${money(inv.extra_discount)}" ${draft ? "" : "disabled"}></label>
       <label class="f">طريقة الدفع <select data-h="pay_source" id="paySrc" ${draft ? "" : "disabled"}></select>
@@ -1572,9 +1593,25 @@ function renderInvoice(keepPicker = true) {
       ${inv.pay && inv.pay.source !== "credit" ? `<label class="f" title="فاضي = الفاتورة كلها؛ الباقي يفضل على حساب المورد">المدفوع دلوقتي (ج)<input data-h="pay_amount" autocomplete="off" type="number" min="0" step="0.01" class="narrow" value="${inv.pay_amount == null ? "" : money(inv.pay_amount)}" placeholder="كلها" ${draft ? "" : "disabled"}></label>
         <label class="f">مرجع الدفع (رقم التحويل)<input data-h="pay_ref" autocomplete="off" value="${esc(inv.pay_ref || "")}" ${draft ? "" : "disabled"}></label>` : ""}
     </div>
+    <small class="muted" id="puDeclaredHint">اكتب الإجمالي المكتوب في آخر ورقة المورد، والبرنامج يقارنه بمجموع الأصناف</small>
     ${inv.supplier_name_raw && !inv.supplier_id ? `<p class="muted">اسم المورد في الملف: ${esc(inv.supplier_name_raw)}</p>` : ""}
   </section>
-  <section class="panel">
+  ${draft ? (keep ? `<div id="qaSlot"></div>` : quickAddHtml()) : ""}
+  <div class="${fileUrl ? "review" : ""}">
+    ${fileUrl ? `<section class="panel doc ${["image","pdf"].includes(inv.source_type) ? "" : "compact"}">${doc}</section>` : ""}
+    <section class="panel purchase-lines-panel">
+      <div class="legend"><span>الحقول المنقطة: قيمة غير مؤكدة تحتاج إلى مراجعة</span>
+        <span>المائل: قيمة محسوبة</span><span>مرّر المؤشر على أي خانة لمعرفة مصدرها</span></div>
+      <div class="tablewrap invoice-lines" data-invoice="${esc(inv.id)}" tabindex="0" role="region" aria-label="أصناف فاتورة الشراء"><table class="lines">
+        <thead><tr><th>#</th><th>الصنف</th><th>كمية</th><th>الرصيد</th><th data-purchase-bonus ${inv.supplier_type === "warehouse" ? "hidden" : ""}>بونص</th><th>سعر الجمهور</th><th>خصم %</th>
+          <th title="هامش ثابت للعلبة زي «4+4» في ورقة الموزع: بيتشال مرتين من سعر الجمهور قبل الخصم ويتزوّد مرة بعده">هامش الموزع</th><th>الصافي</th><th>ضريبة السطر</th><th>الإجمالي</th><th>التشغيلة</th><th>الصلاحية</th><th></th></tr></thead>
+        <tbody>${lines.map(renderLine).join("")}</tbody>
+      </table></div>
+    </section>
+  </div>
+  </div>
+  <aside class="panel invoice-side purchase-summary" data-invoice="${esc(inv.id)}">
+    <div class="invoice-side-scroll">
     <div class="totals">
       <div>إجمالي فاتورة المورد<b>${money(inv.declared_total) || "—"}</b></div>
       <div>الإجمالي المحسوب<b>${money(inv.computed_total) || "—"}</b></div>
@@ -1597,26 +1634,18 @@ function renderInvoice(keepPicker = true) {
         ${i.code === "public_price_changed" ? ` (${money(i.details.old)} ← ${money(i.details.new)})` : ""}
 </li>`).join("")}
     </ul>` : ""}
-    <div class="row">
+    </div>
+    <div class="row invoice-actions">
       ${draft ? `<button class="btn" id="approve" ${CUR.can_approve && (ME.permissions.includes("purchases.approve") || ME.permissions.includes("purchases.edit")) ? "" : "disabled"}>اعتماد الفاتورة وإضافتها للمخزون</button>
         ${fileUrl ? `<button class="btn secondary" id="addLine">إضافة سطر ناقص من الملف</button>` : ""}` : ""}
       ${inv.status === "approved" ? `<button class="btn secondary" id="invLabels">اطبع ملصقات الفاتورة</button>` : ""}
       ${inv.status !== "cancelled" ? `<button class="btn danger" id="cancelInv">إلغاء الفاتورة</button>` : ""}
     </div>
-  </section>
-  ${draft ? (keep ? `<div id="qaSlot"></div>` : quickAddHtml()) : ""}
-  <div class="${fileUrl ? "review" : ""}">
-    ${fileUrl ? `<section class="panel doc ${["image","pdf"].includes(inv.source_type) ? "" : "compact"}">${doc}</section>` : ""}
-    <section class="panel">
-      <div class="legend"><span>الحقول المنقطة: قيمة غير مؤكدة تحتاج إلى مراجعة</span>
-        <span>المائل: قيمة محسوبة</span><span>مرّر المؤشر على أي خانة لمعرفة مصدرها</span></div>
-      <div class="tablewrap"><table class="lines">
-        <thead><tr><th>#</th><th>الصنف</th><th>كمية</th><th>الرصيد</th><th data-purchase-bonus ${inv.supplier_type === "warehouse" ? "hidden" : ""}>بونص</th><th>سعر الجمهور</th><th>خصم %</th>
-          <th title="هامش ثابت للعلبة زي «4+4» في ورقة الموزع: بيتشال مرتين من سعر الجمهور قبل الخصم ويتزوّد مرة بعده">هامش الموزع</th><th>الصافي</th><th>ضريبة السطر</th><th>الإجمالي</th><th>التشغيلة</th><th>الصلاحية</th><th></th></tr></thead>
-        <tbody>${lines.map(renderLine).join("")}</tbody>
-      </table></div>
-    </section>
+  </aside>
   </div>`;
+  sizeInvoiceLayout();
+  restoreLines();
+  restoreSummary();
   fillSuppliers(inv.supplier_id, draft);
   fillPaySources(inv);
   const invoiceDate = $('[data-h="invoice_date"]'), calendar = $("#puDatePicker");
@@ -5562,23 +5591,27 @@ async function viewPos(afterCheckout = false) {
     if (!tabs.length) tabs.push({ id: SALE.id, kind: SALE.kind, lines: SALE.lines.length });
   }
   app.innerHTML = `
-  <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}" data-n="${i + 1}">
+  <div class="pos invoice-workspace">
+    <section class="pos-main invoice-main">
+      <div class="pos-work">
+        <nav class="tabs" aria-label="الفواتير المفتوحة">${tabs.map((d, i) => `<button class="tab ${d.id === SALE.id ? "on" : ""}" data-tab="${esc(d.id)}" data-n="${i + 1}">
       فاتورة ${i + 1}${d.kind === "delivery" ? " · توصيل" : ""} · ${d.lines ? `${d.lines} صنف` : "فارغة"}
       <span class="x" data-close="${esc(d.id)}" title="أغلق هذه الفاتورة" aria-label="إغلاق">✕</span></button>`).join("")}
     <button class="tab add" id="tabNew" title="فاتورة جديدة (${esc(posKey("new_sale"))})">+ فاتورة <kbd>${esc(posKey("new_sale"))}</kbd></button></nav>
-  <div class="pos">
-    <section class="pos-main">
       <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
         <input id="posQ" lang="en" class="big" autocomplete="off" autofocus></label>
       <label class="small muted"><input type="checkbox" id="posAll" ${posShowAll() ? "checked" : ""}> اعرض كمان الأصناف اللي رصيدها صفر</label>
       <div id="posRes" class="results"></div>
       <section class="panel" id="posCart"></section>
+      </div>
+      <div id="posSafety"></div>
       <div id="posQuick"></div>
       <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>Alt+Enter</kbd> علبة + شريط مع بعض · <kbd>Enter</kbd> على البحث الفاضي: للدفع، و<kbd>Enter</kbd> تاني: إتمام البيع · ${posKeysHtml()}</p>
     </section>
-    <aside class="pos-side" id="posSide"></aside>
+    <aside class="pos-side invoice-side panel" id="posSide"></aside>
   </div>
   <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزينة</a> · <a href="#" id="posDeliv">التوصيلات المفتوحة</a>${lastSale() ? ` · <a href="#" id="posLast">🧾 اطبع إيصال آخر فاتورة (رقم ${esc(lastSale().no)})</a>` : ""}${ME.permissions.includes("cash.manage") ? ` · <a href="#" id="posKick">فتح الدرج (F8)</a>` : ""}</p><div id="posSum"></div>`;
+  sizeInvoiceLayout();
   renderCart(); renderSide();                    // renderCart draws the quick row too (syncQuick)
   document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", async (e) => {
     if (e.target.dataset.close) return;
@@ -5794,7 +5827,16 @@ function posMark() {
   const rows = [...document.querySelectorAll("#posCart tbody tr")].filter((r) => !r.querySelector("td[colspan]"));
   if (POS_SEL >= rows.length) POS_SEL = rows.length - 1;
   rows.forEach((r, i) => r.classList.toggle("sel", i === POS_SEL));
-  if (POS_SEL >= 0) rows[POS_SEL]?.scrollIntoView({ block: "nearest" });
+  if (POS_SEL >= 0) revealCartRow(rows[POS_SEL]);
+}
+function revealCartRow(row) {
+  if (!row) return;
+  const pane = $("#posCart .invoice-lines"), header = row.closest("table").tHead;
+  const top = header.rows[0].cells[0].getBoundingClientRect().bottom;
+  const bottom = pane.getBoundingClientRect().top + pane.clientHeight;
+  const bounds = row.getBoundingClientRect();
+  if (bounds.top < top) pane.scrollTop += bounds.top - top;
+  else if (bounds.bottom > bottom) pane.scrollTop += bounds.bottom - bottom;
 }
 function posLine() {
   if (!SALE || !SALE.lines.length) return null;
@@ -5985,6 +6027,7 @@ async function addPosLine(item, packs, units, scanned, note = "") {
   if (!scanned) { $("#posQ").value = ""; delete $("#posQ").dataset.searched; }
   $("#posQ").focus();
   renderCart(); renderSide();
+  if (added) revealCartRow($(`#posCart [data-rm="${CSS.escape(added.id)}"]`)?.closest("tr"));
 }
 
 // UX-27 PR2 (owner 26/11): a discount is typed in EGP or in percent, in two fields side by side; the screen
@@ -6074,6 +6117,8 @@ function keepTypedQty() {
 function renderCart(findings = null) {
   const s = SALE, canDisc = ME.max_discount_bp > 0 || ME.role === "owner";
   const restoreTyped = keepTypedQty();
+  const restoreLines = keepInvoiceScroll("#posCart .invoice-lines");
+  $("#posSafety").innerHTML = "";
   refreshTabLabel();
   const lastNo = Math.max(0, ...s.lines.map((l) => l.line_no));
   // U2-21: dispensing notes, shown once per invoice (a toast the first time) and kept as one line above the items
@@ -6085,7 +6130,7 @@ function renderCart(findings = null) {
   try { $("#posCart").innerHTML = `
     ${dn.length ? `<div class="badge b-info dnotes" role="note">${dn.map((n) => `📋 <b>${esc(n.item || n.ingredient)}</b>: ${esc(n.rules.join(" · "))}${n.source ? ` <span class="muted small">(${esc(n.source)})</span>` : ""}`).join("<br>")}</div>` : ""}
     ${s.lines.length > 1 ? `<p class="muted small">${s.line_order === "entry" ? "الأصناف بترتيب إدخالها" : "الأصناف مرتبة أبجديًا A→Z (أسرع في التحضير)"} — آخر صنف مُضاف عليه علامة ★ ورقم كل صنف هو ترتيب إدخاله</p>` : ""}
-    <div class="tablewrap"><table class="cart">
+    <div class="tablewrap invoice-lines" tabindex="0" role="region" aria-label="أصناف فاتورة البيع"><table class="cart">
       <thead><tr><th>الصنف</th><th>الكمية</th><th>السعر</th><th>الصلاحية</th><th>خصم</th><th>الإجمالي</th><th><span class="sr">حذف</span></th></tr></thead>
       <tbody>${s.lines.map((l) => `<tr class="${l.problem ? "has-err" : ""} ${l.item.mark ? `m-${l.item.mark}` : ""} ${l.line_no === lastNo && s.lines.length > 1 ? "just-added" : ""}">
         <td><span class="lno" title="ترتيب الإدخال">${l.line_no === lastNo && s.lines.length > 1 ? "★" : ""}${l.line_no}</span> <b>${itemHtml({ name_en: l.item.name_en, name_ar: l.item.name_ar })}</b> ${markChip(l.item.mark)}
@@ -6107,8 +6152,9 @@ function renderCart(findings = null) {
         <td class="num"><b>${money(l.net)}</b></td>
         <td><button class="btn small danger" data-rm="${esc(l.id)}" aria-label="إزالة الصنف">✕</button></td></tr>`).join("")
         || `<tr><td colspan="7" class="muted">امسح أول صنف</td></tr>`}</tbody>
-    </table></div><div id="posSafety"></div>`;
+    </table></div>`;
   } finally { POS.redrawing = false; }
+  restoreLines();
   restoreTyped();
   posMark();
   syncQuick();
@@ -6215,8 +6261,10 @@ function renderSide() {
   if (!POS.split) POS.parts = [];
   const remaining = dueNow(s) - POS.parts.reduce((a, p) => a + (p.amount || 0), 0);
   const rnd = dueNow(s) - s.total;                       // U2-14: the cash rounding of this payment
+  const restoreSide = keepInvoiceScroll("#posSide .invoice-side-scroll");
   $("#posSide").innerHTML = `
-    <section class="panel">
+    <div class="invoice-side-scroll">
+    <section>
       <div class="seg2" role="radiogroup" aria-label="نوع الفاتورة">
         <button class="${s.kind !== "delivery" ? "on" : ""}" data-kind="store">${s.kind !== "delivery" ? "✓ " : ""}في الصيدلية</button>
         <button class="${s.kind === "delivery" ? "on" : ""}" data-kind="delivery">${s.kind === "delivery" ? "✓ " : ""}توصيل للمنزل</button></div>
@@ -6242,7 +6290,7 @@ function renderSide() {
         ${manualRoundChoices(s.total, s.manual_rounding_limit).map((d) => `<button type="button" class="btn small secondary ${posManual(s) === d ? "on" : ""}" data-mround="${d}">${money(s.total + d)} ج</button>`).join("")}
         ${posManual(s) != null ? `<button type="button" class="btn small secondary" data-mround="off">رجّع التقريب العادي</button>` : ""}</div>` : ""}
     </section>
-    <section class="panel">
+    <section class="pos-payment">
       ${POS.split ? `<h2>تقسيم الدفع</h2>${POS.parts.map((p, i) => `<div class="row part">
           <select data-pm="${i}">${METHODS.map(([m, t]) => `<option value="${m}" ${p.method === m ? "selected" : ""}>${t}</option>`).join("")}</select>
           ${["card", "transfer"].includes(p.method) ? chanOptions(p.method, p.channel_id).replace("data-ch", `data-pc="${i}"`) : ""}
@@ -6264,8 +6312,12 @@ function renderSide() {
       <div class="row rcpt">
         <label class="chk" title="${s.kind === "delivery" ? "التوصيل يطبع إيصالًا واحدًا تلقائيًا" : `اطبع إيصال لهذا البيع (${esc(posKey("receipt"))})`}"><input type="checkbox" id="posRcpt" ${receiptWanted(s, RCFG, POS.rcpt[s.id]) ? "checked" : ""} ${s.kind === "delivery" ? "disabled" : ""}> 🧾 إيصال <kbd>${esc(posKey("receipt"))}</kbd></label>
         ${s.kind !== "delivery" && POS.rcpt[s.id] == null && RCFG?.auto_receipt ? `<span class="muted small">تلقائي من ${money(RCFG.auto_receipt_min)} ج</span>` : ""}</div>
+    </section>
+    </div>
+    <div class="invoice-actions">
       <button class="btn big" id="posDone" ${s.lines.length || pendingPosAdds(s.id).length ? "" : "disabled"}>إتمام البيع <kbd>${esc(posKey("done"))}</kbd></button>
-    </section>`;
+    </div>`;
+  restoreSide();
   $("#posProof")?.addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
     const fd = new FormData(); fd.append("file", f);
