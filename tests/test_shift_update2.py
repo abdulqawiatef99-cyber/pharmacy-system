@@ -127,6 +127,8 @@ const { chromium } = require('playwright');
 (async () => {
   const [base, user, pw] = process.argv.slice(1);
 """ + LOGIN + r"""
+  let dialog = null;
+  p.on('dialog', (d) => { dialog = d.message(); d.accept(); });
   await p.goto(base + '/#/shift');
   await p.waitForSelector('#shClose');
   await p.fill('#shClose [data-d="10000"]', '5');
@@ -138,6 +140,7 @@ const { chromium } = require('playwright');
   await p.click('#shNew');
   await p.waitForSelector('#shOpen');
   out.prefill = await p.inputValue('#shOpen input[name=v]');
+  out.dialog = dialog;
   console.log(JSON.stringify(out));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -155,6 +158,7 @@ class TestNewShiftButton(PlanCase):
         self.assertEqual(out["fl"], "300.00")
         self.assertIn("سيب في الدرج", out["split"])
         self.assertEqual(out["prefill"], "300.00")
+        self.assertEqual(out["dialog"], "هيفضل في الدرج 300.00 ج، ويتحوّل للخزنة 200.00 ج. تكمّل التقفيل؟")  # QA-31
 
 
 class TestCodexRound1(PlanCase):
