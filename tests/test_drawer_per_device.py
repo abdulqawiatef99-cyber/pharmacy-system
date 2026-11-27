@@ -241,6 +241,23 @@ class TestDrawerPerDevice(Base):
             self.assertEqual(sale["devices"]["drawer"], "sent")
             self.assertEqual(send.call_args.args[0], "win:Fixture Sub")
 
+    def test_main_does_not_pulse_a_secondary_queue_after_printer_settings_change(self):
+        from app.printing import settings as printing_settings
+
+        printing_settings.save(self.db, self.ctx, {"receipt_target": "win:Fixture Main"})
+        sub_id = self.add_sub(receipt_printer="win:Fixture Sub", drawer_kick=True)
+        self.bind(self.sub, sub_id)
+        self.open(self.main)
+        self.open(self.sub)
+        self.request(self.main, "PATCH", f"{SETTINGS}/1", {"receipt_printer": "win:Fixture Sub"}, 422)
+        printing_settings.save(self.db, self.ctx, {"receipt_target": "win:Fixture Sub"})
+        with patch("app.printing.service.escpos.send") as send:
+            for client in (self.main, self.sub):
+                sale = self.sell_browser(client)
+                self.assertEqual(sale["devices"]["drawer"], "none")
+                self.error(client, "/api/print/drawer", {"reason": "cash_check"}, "drawer_kick_disabled")
+            send.assert_not_called()
+
     def test_shift_drawer_totals_and_lan_guide_identify_register(self):
         self.open(self.main, 10000)
         self.bind(self.sub, self.add_sub())

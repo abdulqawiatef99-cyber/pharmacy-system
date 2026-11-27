@@ -47,10 +47,9 @@ def _receipt_destination(db: Database, ctx: Context, register) -> str:
 
 
 def _drawer_kick_available(db: Database, ctx: Context, register) -> bool:
-    if register["id"] == 1:
-        return register["drawer_kick"] != 0
-    return bool(register["drawer_kick"]) and registers.independent_drawer_printer(
-        db, ctx, register["id"], register["receipt_printer"])
+    rid = register["id"]
+    enabled = register["drawer_kick"] != 0 if rid == 1 else bool(register["drawer_kick"])
+    return enabled and registers.drawer_printer_allowed(db, ctx, rid, register["receipt_printer"])
 
 
 def label_config(db: Database, ctx: Context, cfg: dict | None = None) -> dict:

@@ -75,16 +75,21 @@ def _get(db: Database, ctx: Context, rid: int) -> Row:
     return row
 
 
-def independent_drawer_printer(db: Database, ctx: Context, rid: int, target: str | None) -> bool:
-    """A secondary drawer pulse needs a dedicated queue; receipt printing may share one."""
+def drawer_printer_allowed(db: Database, ctx: Context, rid: int, target: str | None) -> bool:
+    """Receipt queues may be shared. A pulse must belong to one physical drawer."""
     from ..printing.service import printer_target
 
-    if not target or target == "browser":
-        return False
     fallback = printer_target(db, ctx.org_id)
-    others = db.all("SELECT id, receipt_printer FROM registers WHERE org_id=? AND branch_id=? AND id<>? AND active=1",
+    if rid != 1 and (not target or target == "browser"):
+        return False
+    dest = (target or fallback).casefold()
+    others = db.all("SELECT id, receipt_printer, drawer_kick FROM registers"
+                    " WHERE org_id=? AND branch_id=? AND id<>? AND active=1",
                     (ctx.org_id, ctx.branch_id, rid))
-    return not any(target.casefold() == (r["receipt_printer"] or fallback).casefold() for r in others)
+    return not any(
+        dest == (r["receipt_printer"] or fallback).casefold()
+        for r in others if r["id"] == 1 or r["drawer_kick"] == 1
+    )
 
 
 def save(db: Database, ctx: Context, data: dict, rid: int | None = None) -> dict:
@@ -115,8 +120,10 @@ def save(db: Database, ctx: Context, data: dict, rid: int | None = None) -> dict
         if before is None:
             rid = db.one("SELECT coalesce(max(id),0)+1 id FROM registers WHERE org_id=? AND branch_id=?",
                          (ctx.org_id, ctx.branch_id))["id"]
-        if rid != 1 and fields["active"] and fields["drawer_kick"]:
-            if not independent_drawer_printer(db, ctx, rid, fields["receipt_printer"]):
+        routing_changed = before is None or any(before[k] != fields[k] for k in ("active", "receipt_printer", "drawer_kick"))
+        kick_enabled = fields["drawer_kick"] != 0 if rid == 1 else bool(fields["drawer_kick"])
+        if routing_changed and fields["active"] and kick_enabled:
+            if not drawer_printer_allowed(db, ctx, rid, fields["receipt_printer"]):
                 raise ValidationFailed("اختار طابعة إيصال خاصة بالدرج ده قبل تشغيل فتح الدرج",
                                        code="drawer_needs_own_printer")
         if before is None:
