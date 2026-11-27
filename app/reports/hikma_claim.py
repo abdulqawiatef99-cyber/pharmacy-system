@@ -38,6 +38,11 @@ def _half(x: int) -> int:
     return (x + 1) // 2 if x >= 0 else -((-x + 1) // 2)
 
 
+def _due(owner: str, value: int, cost: int) -> int:
+    base = value if owner == "pharmacy" else value - cost
+    return base - _half(value - cost)
+
+
 def _share(total: int, weights: list[int]) -> list[int]:
     """`total` over the weights, whole piastres that add up to `total` exactly, never capped by the weights
     (Codex P1 on #416: rounded unit prices can sum below the recorded refund). Largest remainders get the rest."""
@@ -62,6 +67,16 @@ def _by_owner(total: int, parts) -> dict[str, tuple[int, Decimal, list]]:
     values = _share(total, weights if any(weights) else [sum(q for q, _ in grouped[owner]) for owner in OWNERS])
     return {owner: (v, sum((Decimal(a["unit_cost"] or 0) * q * 100 for q, a in grouped[owner]), Decimal(0)),
                     grouped[owner]) for owner, v in zip(OWNERS, values)}
+
+
+def _legacy_refund(before, kept) -> int:
+    from ..sales.service import alloc_gross, kept_value, line_fixed
+    allocs = [a for _, a in before]
+    line = allocs[0]
+    args = (line["discount_bp"], line["line_total"])
+    fixed = line_fixed(line)
+    return (kept_value(allocs, {a["id"]: q for q, a in before}, *args, price=alloc_gross, fixed=fixed)
+            - kept_value(allocs, {a["id"]: q for q, a in kept}, *args, price=alloc_gross, fixed=fixed))
 
 
 def settings(db: Database, org_id: str) -> dict:
@@ -172,7 +187,7 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
         cost = _p(sum((r["cost"] for r in ls), Decimal(0)))
         margin = value - cost
         hospital_half = _half(margin)            # rounded once on the total
-        due = value - hospital_half if owner == "pharmacy" else margin - hospital_half
+        due = _due(owner, value, cost)
         for r in ls:
             r["cost"] = _p(r["cost"])
             r["margin"] = r["value"] - r["cost"]
@@ -192,10 +207,11 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
     # each sale's returns are replayed oldest first, from before the period too, so a lot taken by an earlier return
     # is never taken again (Codex P1 on #416); only the returns inside the period are counted
     from ..sales.service import line_gross, returns_history
-    hist = returns_history(db, org, {r["sid"] for r in period}, dated=True)
+    prior_sales = sorted({r["sid"] for r in period})
+    hist = returns_history(db, org, prior_sales, dated=True)
     replay = []
     line_balances: dict[str, int] = {}
-    for sid in sorted({r["sid"] for r in period}):
+    for sid in prior_sales:
         consumed: dict = {}
         totals = {x["id"]: x["total"] for x in db.all(
             "SELECT id, total-rounding total FROM sale_returns WHERE org_id=? AND sale_id=?", (org, sid))}
@@ -209,7 +225,8 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
         for lid, q in lines.items():
             q = int(q)
             al = [dict(x) for x in db.all(
-                        "SELECT a.rowid rid, a.qty_base, a.unit_cost, a.unit_price, a.pack_price, a.pack_size, l.line_total,"
+                        "SELECT a.rowid rid, a.id, a.qty_base, a.unit_cost, a.unit_price, a.pack_price, a.pack_size,"
+                        " l.line_total, l.discount_bp, l.discount_amount, l.invoice_share,"
                         " coalesce(b.owner,'pharmacy') owner"
                         " FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id AND l.org_id=? LEFT JOIN batches b"
                         " ON b.id=a.batch_id AND b.org_id=l.org_id WHERE a.sale_line_id=? ORDER BY a.rowid DESC", (org, lid))]
@@ -228,10 +245,12 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
         if refunds:
             values = [int(refunds.get(lid, 0)) for lid, *_ in per_line]
         else:
-            # an older return has only its total (Codex P1 on #416): spread it over its lines by their price, the last
-            # line taking the remainder, so the lines add up to the refund exactly
-            weights = [line_gross(takes) for _, takes, _, _ in per_line]
-            values = _share(ret_total, weights)
+            # Older audit entries have no line amounts. Replay their original discount rule
+            # when it reconciles to the recorded refund, or allocate its exact total by value.
+            values = [_legacy_refund(before, kept) for _, _, before, kept in per_line]
+            if sum(values) != ret_total or any(v < 0 for v in values):
+                weights = [line_gross(takes) for _, takes, _, _ in per_line]
+                values = _share(ret_total, weights)
         for (lid, takes, before, kept), line_v in zip(per_line, values):
             booked = _by_owner(line_v, takes)
             line_total = takes[0][1]["line_total"]
@@ -252,9 +271,16 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
             back_rows.append({"sale_no": r["sale_no"], "sold_at": r["completed_at"], "returned_at": r["created_at"], "value": r["total"]})
     back_v = sum(v for v, _ in pv.values())
     back_c = _p(sum((c for _, c in pv.values()), Decimal(0)))
-    ph_v, ph_c = pv["pharmacy"][0], _p(pv["pharmacy"][1])
-    ho_v, ho_c = pv["hospital"][0], _p(pv["hospital"][1])
-    back_due = (ph_v - _half(ph_v - ph_c)) + ((ho_v - ho_c) - _half(ho_v - ho_c))
+    opening = {owner: [0, Decimal(0)] for owner in OWNERS}
+    for row in _lines(db, org, prior_sales, lo):
+        opening[row["owner"]][0] += row["value"]
+        opening[row["owner"]][1] += row["cost"]
+    back_due = 0
+    for owner, (value, cost) in opening.items():
+        returned_value, returned_cost = pv[owner]
+        # Round each half-margin on the owner totals before and after the returns. The
+        # difference reverses the same liability when a partial return crosses periods.
+        back_due += _due(owner, value, _p(cost)) - _due(owner, value - returned_value, _p(cost - returned_cost))
     back = back_rows
     due = out["pharmacy"]["due"] + out["hospital"]["due"] - back_due
     adv = st["advance"]
@@ -282,7 +308,7 @@ def claim(db: Database, ctx: Context, branch: str, date_from: str, date_to: str)
     return {"branch": branch, "title": st["title"], "customer_id": cid, "from": d1.isoformat(), "to": d2.isoformat(),
             "pharmacy": out["pharmacy"], "hospital": out["hospital"],
             "previous_returns": {"rows": back, "value": back_v, "cost": back_c, "due": back_due,
-                                 "by_owner": {"pharmacy": ph_v, "hospital": ho_v}},
+                                 "by_owner": {owner: pv[owner][0] for owner in OWNERS}},
             "due": due, "advance": adv, "net": due - adv, "next_advance": adv, "total": due - adv + adv,
             "invoices": len(sales), "no_cost_lines": no_cost,
             "account": {"debit": acct["debit"], "returns": -acct["back"], "net": account_net, "paid_not_on_account": paid,

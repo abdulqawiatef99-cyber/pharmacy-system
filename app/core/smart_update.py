@@ -649,32 +649,24 @@ class UpdateAdmission:
             self.pending_release = journal["release"]
         elif state.get("pending") and active.get("needs_db"):
             self.pending_release = active["id"]
-        self.update_log = home / "update-log.jsonl"
-        self.start_offset = 0
-        if self.pending_release:
-            try:
-                self.start_offset = self.update_log.stat().st_size
-            except FileNotFoundError:
-                pass
+        self.journal_name = releases.journal_path(home).name
+        self.start_version = self._journal_version() if self.pending_release else None
+
+    def _journal_version(self):
+        # Windows directory enumeration provides size and timestamps without opening the
+        # file. The atomic transition from "swapped" to "done" changes its size as well.
+        with os.scandir(self.home) as entries:
+            for entry in entries:
+                if entry.name == self.journal_name:
+                    stat = entry.stat(follow_symlinks=False)
+                    return stat.st_size, stat.st_mtime_ns, stat.st_ino
+        return None
 
     def _committed(self) -> bool:
         try:
-            # The launcher appends this event after replacing both metadata files. Poll the append-only
-            # log first so requests cannot hold either destination open during os.replace on Windows.
-            with self.update_log.open("rb") as f:
-                f.seek(self.start_offset)
-                for line in f:
-                    if not line.endswith(b"\n"):
-                        return False
-                    try:
-                        event = json.loads(line)
-                    except (UnicodeError, ValueError):
-                        continue
-                    if (isinstance(event, dict) and event.get("step") == "confirm"
-                            and event.get("ok") is True and event.get("release") == self.pending_release):
-                        break
-                else:
-                    return False
+            # Keep the journal and pointer closed while the installed launcher is replacing them.
+            if self._journal_version() in (None, self.start_version):
+                return False
             journal = releases.read_journal(self.home)
             if journal.get("state") != "done" or journal.get("release") != self.pending_release:
                 return False

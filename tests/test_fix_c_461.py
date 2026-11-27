@@ -1,6 +1,7 @@
 """Synthetic regressions for the three FIX-C findings in #461."""
 from dataclasses import replace
 from datetime import date, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -8,7 +9,10 @@ from starlette.testclient import TestClient
 
 import manage
 import release_bootstrap as releases
+from app.catalog import service as catalog
+from app.core import audit
 from app.db import Database
+from app.inventory import service as inventory
 from app.reports import hikma_claim
 from app.sales import rounding
 from app.sales.cash import CashDrawer
@@ -85,6 +89,46 @@ class TestReissuedHikmaClaim(test_u3_3_hikma_claim.TestHikmaClaim):
             self.s.return_items(self.ctx, sale["id"], {lid: 2}, refund_method="credit", reason="اختبار")
         returned = hikma_claim.claim(self.db, self.ctx, "shibin", new, new)["previous_returns"]
         self.assertEqual(returned["by_owner"], {owner: first[owner]["value"] for owner in ("pharmacy", "hospital")})
+
+    def test_mixed_owner_partial_return_reverses_rounded_due(self):
+        old, new = yesterday(self.s.today.isoformat()), self.s.today.isoformat()
+        sale = self.sell(4, disc=1)
+        with self.db.transaction():
+            self.db.execute("UPDATE batches SET owner='hospital' WHERE item_id=? AND batch_no='NEW'", (self.pan,))
+            self.db.execute("UPDATE sales SET completed_at=? WHERE id=?", (during(old), sale["id"]))
+        first = hikma_claim.claim(self.db, self.ctx, "shibin", old, old)
+        self.s.return_items(self.ctx, sale["id"], {sale["lines"][0]["id"]: 3}, refund_method="credit", reason="اختبار")
+        later = hikma_claim.claim(self.db, self.ctx, "shibin", new, new)
+        self.assertEqual(first["due"] + later["due"], 1738)
+
+    def test_legacy_return_uses_actual_discount_by_owner_where_reconcilable(self):
+        old, new = yesterday(self.s.today.isoformat()), self.s.today.isoformat()
+        item = catalog.create_item(self.db, self.ctx, {"name_en": "Hospital Test Item", "public_price": 2000})
+        with self.db.transaction():
+            expiry = (self.s.today + timedelta(days=100)).isoformat()
+            lot = inventory.get_or_create_batch(self.db, self.ctx, item, "TEST", expiry)
+            inventory.post_movement(self.db, self.ctx, item_id=item, batch_id=lot, qty_delta=2,
+                                    movement_type="opening", unit_cost=Decimal(10))
+        sid = self.s.create(self.ctx, self.cust)
+        self.s.add_line(self.ctx, sid, self.pan, units=2, discount_bp=1000)
+        draft = self.s.add_line(self.ctx, sid, item, units=2)
+        sale = self.s.complete(self.ctx, sid, on_credit=draft["total"], safety_decisions=self.ack_all(sid))
+        with self.db.transaction():
+            self.db.execute("UPDATE batches SET owner='hospital' WHERE id=?", (lot,))
+            self.db.execute("UPDATE sales SET completed_at=? WHERE id=?", (during(old), sid))
+
+        record = audit.record
+
+        def old_audit(db, ctx, action, *args, **kwargs):
+            if action == "sale.return":
+                kwargs["after"] = {k: v for k, v in kwargs["after"].items() if k != "line_refunds"}
+            return record(db, ctx, action, *args, **kwargs)
+
+        with patch.object(audit, "record", side_effect=old_audit):
+            self.s.return_items(self.ctx, sid, {l["id"]: 1 for l in sale["lines"]},
+                                refund_method="credit", reason="اختبار")
+        returned = hikma_claim.claim(self.db, self.ctx, "shibin", new, new)["previous_returns"]
+        self.assertEqual(returned["by_owner"], {"pharmacy": 1710, "hospital": 2000})
 
 
 class TestRefundDate(PlanCase):
@@ -215,3 +259,13 @@ class TestPendingDatabaseUpdate(PlanCase):
                 self.assertEqual(client.post("/api/cash/open", headers=H, json={"opening_cash": 10000}).status_code, 503)
         journal.assert_not_called()
         state.assert_not_called()
+
+    def test_committed_release_accepts_cashier_writes_if_logging_fails(self):
+        home, release_id, _, client, _, _ = self.candidate()
+        self.assertTrue(client.get("/api/health").json()["ok"])
+        releases.confirm(home, release_id)
+        with patch.object(releases, "log_event", side_effect=OSError("synthetic log append failure")):
+            with self.assertRaises(OSError):
+                releases.finish_journal(home, release_id)
+        self.assertEqual(releases.read_journal(home)["state"], "done")
+        self.assertEqual(client.post("/api/cash/open", headers=H, json={"opening_cash": 10000}).status_code, 201)
