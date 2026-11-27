@@ -111,11 +111,21 @@ class TestDrawerPerDevice(Base):
             ("Forwarded", "for=192.0.2.2"),
             ("X-Forwarded-For", "192.0.2.2"),
             ("X-Real-IP", "192.0.2.2"),
+            ("Via", "1.1 fixture-proxy"),
+            ("X-Forwarded-Host", "main-fixture"),
+            ("X-Forwarded-Proto", "http"),
         ):
             with self.subTest(header=header):
                 refused = self.request(self.main, "GET", "/api/cash/current", status=409, **{header: value})
                 self.assertEqual(refused.json()["error"]["code"], "device_unbound")
         self.assertEqual(self.request(self.main, "GET", "/api/cash/current").json()["id"], main_shift)
+        proxied = TestClient(self.main.app, client=("127.0.0.1", 41003), base_url="http://127.0.0.1")
+        self.addCleanup(proxied.close)
+        self.login_browser(proxied)
+        self.bind(proxied, self.add_sub())
+        sub_shift = self.open(proxied)
+        report = self.request(proxied, "GET", "/api/cash/current", Via="1.1 fixture-proxy").json()
+        self.assertEqual(report["id"], sub_shift)
 
     def test_binding_sets_private_cookie_rotates_and_requires_owner_or_manager(self):
         sub_id = self.add_sub()
@@ -228,6 +238,21 @@ class TestDrawerPerDevice(Base):
         history = self.request(self.main, "GET", f"/api/cash/shifts/{old_shift}").json()
         self.assertEqual((current["voided_count"], current["credit_refunds"]), (1, 2000))
         self.assertEqual((history["sales_count"], history["voided_count"], history["returns_count"]), (2, 0, 0))
+
+    def test_credit_events_use_the_only_open_register_after_original_shift_closes(self):
+        original = self.open(self.main)
+        self.bind(self.sub, self.add_sub())
+        customer = self.s.create_customer(self.ctx, name="Synthetic customer", credit_limit=12000)
+        voided = self.sell(credit=4000, customer=customer)
+        returned = self.sell(credit=4000, customer=customer)
+        self.request(self.main, "POST", "/api/cash/close", {"counted_cash": 10000, "shift_id": original})
+        sub_shift = self.open(self.sub)
+        self.request(self.fresh, "POST", f"/api/sales/{voided['id']}/void", {"reason": "إلغاء تجريبي"})
+        self.request(self.fresh, "POST", f"/api/sales/{returned['id']}/return", {
+            "lines": {returned["lines"][0]["id"]: 1}, "refund_method": "credit", "reason": "مرتجع تجريبي"
+        })
+        current = self.request(self.sub, "GET", f"/api/cash/shifts/{sub_shift}").json()
+        self.assertEqual((current["voided_count"], current["credit_refunds"], current["cash_by_kind"]), (1, 2000, {}))
 
     def test_count_is_scoped_and_only_management_can_close_another_drawer_to_the_same_treasury(self):
         main_shift = self.open(self.main)
