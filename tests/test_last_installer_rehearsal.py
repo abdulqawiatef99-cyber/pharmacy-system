@@ -150,7 +150,7 @@ class TestLastInstallerRehearsal(SmartUpdateLauncher):
 
 
 class TestPurchaseVATWalletMigration(SmartUpdateLauncher):
-    legacy_pending = ("0045_purchase_vat_wallet_returns",)
+    legacy_pending = ("0045_purchase_vat_wallet_returns", "0051_mixed_refunds")
 
     def historical_rows(self):
         con = sqlite3.connect(self.s.db_path)
@@ -196,7 +196,8 @@ class TestPurchaseVATWalletMigration(SmartUpdateLauncher):
                     inventory.post_movement(db, ctx, item_id=item, batch_id=batch, qty_delta=quantity,
                                             movement_type=kind, unit_cost=Decimal("20"), ref_id="qa-sale",
                                             ref_line_id="qa-line")
-            self.assertFalse(db.one("SELECT version FROM schema_migrations WHERE version=?", self.legacy_pending))
+            for pending in self.legacy_pending:
+                self.assertFalse(db.one("SELECT version FROM schema_migrations WHERE version=?", (pending,)))
         finally:
             db.close()
 
@@ -220,7 +221,8 @@ class TestPurchaseVATWalletMigration(SmartUpdateLauncher):
         try:
             self.assertEqual(db.pending_migrations(), [])
             self.assertEqual(db.all("PRAGMA foreign_key_check"), [])
-            self.assertIsNone(db.one("SELECT channel_id FROM sale_returns WHERE id='qa-return'")[0])
+            historical = db.one("SELECT channel_id, part_of, shift_id, exchange_offset FROM sale_returns WHERE id='qa-return'")
+            self.assertEqual(tuple(historical), (None, None, None, 0))
             self.assertIn("tax_included", {r["name"] for r in db.all("PRAGMA table_info(purchase_invoice_lines)")})
         finally:
             db.close()

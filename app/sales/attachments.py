@@ -140,7 +140,7 @@ def transfer_state(db: Database, org_id: str, sale_id: str, paid_transfer: int) 
     confirms the whole transfer), `received` (what may fund a refund: the whole transfer until a reviewer
     says otherwise, by a problem or by approving only part of it; a proof still waiting adds nothing until
     it is approved), and the report's `state`."""
-    offset = db.one("SELECT coalesce(sum(verified_offset),0) FROM sale_payments WHERE org_id=? AND sale_id=?"
+    offset = db.one("SELECT coalesce(sum(exchange_offset),0) FROM sale_payments WHERE org_id=? AND sale_id=?"
                     " AND method='transfer'", (org_id, sale_id))[0]
     rows = db.all("SELECT review, confirmed_amount FROM sale_attachments WHERE org_id=? AND sale_id=?",
                   (org_id, sale_id))
@@ -179,8 +179,8 @@ def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
         "SELECT s.id, s.sale_no, s.completed_at, s.paid_transfer, s.total, s.status, u.full_name cashier,"
         " (SELECT group_concat(DISTINCT c.name) FROM sale_payments p JOIN payment_channels c ON c.id=p.channel_id"
         "   WHERE p.sale_id=s.id AND p.method='transfer') channel,"
-        " (SELECT coalesce(sum(p.verified_offset),0) FROM sale_payments p WHERE p.sale_id=s.id"
-        "   AND p.org_id=s.org_id AND p.method='transfer') verified_offset,"
+        " (SELECT coalesce(sum(p.exchange_offset),0) FROM sale_payments p WHERE p.sale_id=s.id"
+        "   AND p.org_id=s.org_id AND p.method='transfer') exchange_offset,"
         " (SELECT count(*) FROM sale_attachments a WHERE a.org_id=s.org_id AND a.sale_id=s.id) proofs,"   # #324 B8
         " (SELECT CASE WHEN sum(a.review='problem') THEN 'problem' WHEN sum(a.review='pending') THEN 'pending'"
         "   WHEN count(*) THEN 'ok' END FROM sale_attachments a WHERE a.org_id=s.org_id AND a.sale_id=s.id) review"
@@ -195,7 +195,7 @@ def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
                     (ctx.org_id, ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1])):
         proofs.setdefault(p["sale_id"], []).append(p)
     for r in rows:
-        st = _state(proofs.get(r["id"], []), r["paid_transfer"], r.pop("verified_offset"))
+        st = _state(proofs.get(r["id"], []), r["paid_transfer"], r.pop("exchange_offset"))
         r["verified"] = st["verified"]
         r["state"] = "voided" if r["status"] == "voided" else st["state"]
     live = [r for r in rows if r["state"] != "voided"]

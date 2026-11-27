@@ -12,13 +12,27 @@ def allocation_policy(db, org):
     return row["value"] if row and row["value"] in ALLOCATION_POLICIES else ALLOCATION_POLICIES[0]
 
 
+def has_multiple_tenders(db, org, sale):
+    if sum(bool(sale[field]) for field in ("paid_cash", "paid_card", "paid_transfer", "on_credit")) > 1:
+        return True
+    return bool(db.one("SELECT 1 FROM sale_payments WHERE org_id=? AND sale_id=? AND amount>0"
+                       " GROUP BY method,channel_id LIMIT 1 OFFSET 1", (org, sale["id"])))
+
+
 def original_capacity(db, ctx, sale, rounding_left):
     org, sid = ctx.org_id, sale["id"]
     received = {(r["method"], r["channel_id"]): r["amount"] for r in db.all(
         "SELECT method, channel_id, sum(amount) amount FROM sale_payments WHERE org_id=? AND sale_id=?"
         " AND method IN ('card','transfer') GROUP BY method, channel_id ORDER BY min(rowid)", (org, sid))}
-    if sale["paid_card"] and not any(m == "card" for m, _ in received):
-        received["card", None] = sale["paid_card"]
+    # Sales from before channel-level payments still have the card amount on the invoice.
+    card_left = sale["paid_card"] or 0
+    for key in [key for key in received if key[0] == "card"]:
+        received[key] = min(card_left, received[key])
+        card_left -= received[key]
+    if card_left:
+        received["card", None] = received.get(("card", None), 0) + card_left
+    if not sale["paid_transfer"]:
+        received = {key: amount for key, amount in received.items() if key[0] != "transfer"}
     received["cash", None] = sale["paid_cash"] or 0
     received["credit", None] = (sale["on_credit"] or 0) if sale["customer_id"] else 0
 
@@ -27,9 +41,15 @@ def original_capacity(db, ctx, sale, rounding_left):
         " GROUP BY refund_method, channel_id", (org, sid))}
     caps = {key: max(0, amount - used.get(key, 0)) for key, amount in received.items()}
 
-    # Older explicit card refunds have a NULL channel. Consume them against the original card rows in
-    # payment order, which is also the order used by the original account reversal.
-    card_unknown = used.get(("card", None), 0) if ("card", None) not in received else 0
+    wallets = [key for key in caps if key[0] == "transfer"]
+    wallet_history, unknown_history, paid_by_wallet = (
+        money.legacy_wallet_refund_reserve(db, ctx, sid) if wallets else ({}, 0, 0))
+    # Channel-less card refunds consume card capacity in payment order, except money proved to
+    # have come from a distinct original wallet account.
+    card_unknown = (max(0, used.get(("card", None), 0) - paid_by_wallet)
+                    if ("card", None) not in received else 0)
+    if ("card", None) in received:
+        caps["card", None] += min(paid_by_wallet, used.get(("card", None), 0))
     cash_other = max(0, used.get(("cash", None), 0) - received["cash", None])
     for key in caps:
         if key[0] == "card":
@@ -39,19 +59,19 @@ def original_capacity(db, ctx, sale, rounding_left):
             card_unknown -= from_card
             cash_other -= take - from_card
 
-    wallets = [key for key in caps if key[0] == "transfer"]
     if wallets:
         verified = transfer_state(db, org, sid, sale["paid_transfer"])["verified"]
-        # A partial review does not identify which fresh wallet was confirmed. Only the guaranteed
-        # amount on each channel is spendable. An exchange offset is already confirmed on its channel.
+        # A partial review does not identify which fresh wallet was confirmed.
         short = sale["paid_transfer"] - verified
         offsets = {r["channel_id"]: r["amount"] for r in db.all(
-            "SELECT channel_id, sum(verified_offset) amount FROM sale_payments WHERE org_id=? AND sale_id=?"
+            "SELECT channel_id, sum(exchange_offset) amount FROM sale_payments WHERE org_id=? AND sale_id=?"
             " AND method='transfer' GROUP BY channel_id", (org, sid))}
-        legacy = money.legacy_wallet_refund_reserve(db, ctx, sid)
         for key in wallets:
             caps[key] = max(0, caps[key] - min(short, received[key] - offsets.get(key[1], 0))
-                            - legacy - cash_other)
+                            - wallet_history.get(key[1], 0) - unknown_history)
+            reserved = min(caps[key], cash_other)
+            caps[key] -= reserved
+            cash_other -= reserved
 
     # Keep the unpaid positive rounding available for the return that gives it back.
     caps["cash", None] = max(0, caps["cash", None] - rounding_left)

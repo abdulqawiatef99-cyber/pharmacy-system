@@ -4717,7 +4717,7 @@ async function viewSale(id) {
   ${s.returns.length ? `<section class="panel"><h2>المرتجعات</h2><table><thead><tr><th>اليوم</th><th>المبلغ</th><th>رُدّ</th><th>السبب</th><th>سجّله</th><th></th></tr></thead><tbody>
     ${[...returns.values()].map((r) => `<tr><td>${esc(dayOf(r.created_at))} ${hhmm(r.created_at)}</td><td class="num">${money(r.total)}</td><td>${esc(refundParts(r.parts))}</td>
       <td>${esc(r.reason)}</td><td>${esc(r.by_name || "")}</td><td><a class="btn small secondary" href="/return-receipt/${esc(r.id)}" target="_blank">🖨 إيصال المرتجع</a></td></tr>`).join("")}</tbody></table></section>` : ""}
-  ${s.paid_transfer || s.attachments.length ? `<section class="panel"><h2>صورة التحويل ${s.paid_transfer && !s.attachments.length ? `<span class="badge b-warn">⚠ لا توجد صورة</span>` : ""}</h2>
+  ${s.paid_transfer || s.attachments.length ? `<section class="panel"><h2>صورة التحويل ${s.paid_transfer > (s.verified_wallet_offset || 0) && !s.attachments.length ? `<span class="badge b-warn">⚠ لا توجد صورة</span>` : ""}</h2>
     <div class="proofs">${s.attachments.map((a) => `<figure>${a.mime_type === "application/pdf" ? `<a href="/api/attachments/${esc(a.id)}" target="_blank">📄 PDF</a>`
       : `<a href="/api/attachments/${esc(a.id)}" target="_blank"><img src="/api/attachments/${esc(a.id)}" alt="صورة التحويل" loading="lazy"></a>`}
       <figcaption><span class="badge ${{ ok: "b-ok", problem: "b-err", pending: "b-warn" }[a.review]}">${{ ok: "✓ تمت مراجعتها", problem: "✕ بها مشكلة", pending: "⚠ بانتظار المراجعة" }[a.review]}</span>

@@ -3218,9 +3218,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
         MET = {"cash": "نقدًا من الدرج", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
+        exchange = x["exchange"]
+        parts = exchange["refund_due"] if exchange else x["refund_payments"]
+        total_back = exchange["settled"]["refund"] if exchange else r["total"]
         tenders = "".join(
             f"<tr><td>{MET.get(p['method'], '')}{' · ' + e(p['channel']) if p['channel'] else ''}</td>"
-            f"<td>{m(p['amount'])}</td></tr>" for p in x["refund_payments"])
+            f"<td>{m(p['amount'])}</td></tr>" for p in parts)
+        exchange_value = (f"<tr><td>قيمة الأصناف المرتجعة في الاستبدال</td><td>{m(r['total'])}</td></tr>"
+                          if exchange else "")
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
         info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"بيعت <bdi dir='ltr'>{sold}</bdi> · أُرجعت <bdi dir='ltr'>{when}</bdi>",
                 f"سجّله: {e(r['by_name'] or '')}"]
@@ -3231,7 +3236,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}<h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
 <table>{rows}</table><hr><table>
-<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr>{tenders}</table>
+{exchange_value}<tr class="t"><td>المبلغ المرتجع</td><td>{m(total_back)}</td></tr>{tenders}</table>
 <p class="s">السبب: {e(r['reason'])}</p><p class="sig">توقيع العميل: ................</p></div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 

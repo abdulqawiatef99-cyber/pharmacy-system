@@ -863,6 +863,9 @@ class Sales:
         s["delivery"] = dict(d) if d else None
         from .attachments import listing as att_listing
         s["attachments"] = att_listing(self.db, ctx, sid)
+        s["verified_wallet_offset"] = self.db.one(
+            "SELECT coalesce(sum(exchange_offset),0) FROM sale_payments WHERE sale_id=? AND org_id=?"
+            " AND method='transfer' AND exchange_offset>0", (sid, ctx.org_id))[0] if s["paid_transfer"] else 0
         s["returns"] = [dict(r) for r in self.db.all(
             "SELECT r.id, r.part_of, r.total, r.refund_method, r.channel_id, c.name channel, r.reason, r.created_at,"
             " u.full_name by_name FROM sale_returns r LEFT JOIN users u ON u.id=r.created_by"
@@ -944,7 +947,8 @@ class Sales:
                         (("cash", paid_cash), ("card", paid_card), ("credit", on_credit)) if a]
             if min(paid_cash, paid_card, on_credit) < 0:
                 raise ValidationFailed("مبالغ الدفع لا تكون بالسالب")
-        payments = [*(_offsets or []), *self._check_payments(ctx, payments)]
+        offsets = [{**p, "exchange_offset": p["amount"]} for p in (_offsets or [])]
+        payments = [*offsets, *self._check_payments(ctx, payments)]
         paid_cash = sum(p["amount"] for p in payments if p["method"] == "cash")
         paid_card = sum(p["amount"] for p in payments if p["method"] == "card")
         paid_transfer = sum(p["amount"] for p in payments if p["method"] == "transfer")
@@ -1129,10 +1133,9 @@ class Sales:
             from ..finance import money
             for p in payments:
                 carried = "source_account" in p
-                verified = p["amount"] if carried and p["method"] == "transfer" else 0
-                self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount, verified_offset)"
+                self.db.execute("INSERT INTO sale_payments (id, org_id, sale_id, method, channel_id, amount, exchange_offset)"
                                 " VALUES (?,?,?,?,?,?,?)", (new_id(), ctx.org_id, sid, p["method"],
-                                                            p["channel_id"], p["amount"], verified))
+                                                            p["channel_id"], p["amount"], p.get("exchange_offset", 0)))
                 if carried:
                     money.carry_sale_payment(self.db, ctx, p["method"], p["channel_id"], p["amount"],
                                              p["source_account"], sid, note=f"استبدال فاتورة {no}")
@@ -1520,7 +1523,7 @@ class Sales:
     # ------------------------------------------------------------ returns / void
     def return_items(self, ctx: Context, sid: str, lines: dict[str, int], *, refund_method: str,
                      reason: str, give_back_change: bool = True, channel_id: str | None = None,
-                     _exchange: bool = False, _preview: bool = False) -> dict:
+                     _exchange: bool = False, _preview: bool = False, _exchange_sale_id: str | None = None) -> dict:
         """lines: {sale_line_id: base_units_returned}. Stock goes back to the
         same batches it left from (latest-taken first)."""
         ctx.require("sales.return")
@@ -1642,13 +1645,12 @@ class Sales:
                 # a transfer the owner or a manager marked "not received" is money the shop never got: it funds no
                 # refund, in cash or to a card (#324 M2-01)
                 # ... and only the part confirmed when a reviewer approved part of it (#324 M2-01)
-                unreceived, verified = False, 0
+                unreceived = False
                 if s["paid_transfer"]:
                     from .attachments import transfer_state
                     state = transfer_state(self.db, ctx.org_id, sid, s["paid_transfer"])
-                    got, verified = state["received"], state["verified"]
-                    unreceived = got < s["paid_transfer"]
-                    received -= s["paid_transfer"] - got
+                    unreceived = state["verified"] < s["paid_transfer"]
+                    received -= s["paid_transfer"] - state["verified"]
                 done = {r["refund_method"]: r["t"] for r in self.db.all(
                     "SELECT refund_method, coalesce(sum(total), 0) t FROM sale_returns WHERE sale_id=? AND org_id=?"
                     " AND refund_method IN ('cash', 'card', 'transfer') GROUP BY refund_method", (sid, ctx.org_id))}
@@ -1658,28 +1660,16 @@ class Sales:
                 # brought on this invoice. Back to a card / wallet: only money that came by card or transfer.
                 # Cash for an invoice paid by card is a rare real exception: owner or manager, with the reason.
                 by_cash = (s["paid_cash"] or 0) - done.get("cash", 0)
-                by_card = (s["paid_card"] or 0) - done.get("card", 0)
+                if refund_method in ("card", "transfer"):
+                    capacity = dict(refunds.original_capacity(self.db, ctx, s, 0))
+                    by_card = sum(room for (method, _), room in capacity.items() if method == "card")
                 if refund_method == "transfer":
-                    channels = {p["channel_id"]: p["amount"] for p in self.db.all(
-                        "SELECT channel_id, sum(amount) amount FROM sale_payments"
-                        " WHERE org_id=? AND sale_id=? AND method='transfer' GROUP BY channel_id",
-                        (ctx.org_id, sid))}
+                    channels = [ch for method, ch in capacity if method == "transfer"]
                     if channel_id is None and len(channels) == 1:
-                        channel_id = next(iter(channels))
+                        channel_id = channels[0]
                     if channel_id not in channels:
                         raise Conflict("اختار المحفظة اللي اتدفعت بيها الفاتورة", code="refund_wallet_channel")
-                    previous = self.db.one(
-                        "SELECT coalesce(sum(total),0) amount FROM sale_returns WHERE org_id=? AND sale_id=?"
-                        " AND refund_method='transfer' AND channel_id IS ?", (ctx.org_id, sid, channel_id))["amount"]
-                    # A review can confirm a partial transfer without identifying its channel. Reserve the
-                    # whole shortfall against the chosen channel so we never refund unverified money.
-                    short = (s["paid_transfer"] or 0) - verified
-                    # Historical card refunds could leave from the wallet regardless of the amount charged to the card.
-                    legacy = money.legacy_wallet_refund_reserve(self.db, ctx, sid)
-                    # Cash paid out with an approval can also have used wallet money after exhausting cash.
-                    cash_other = max(0, done.get("cash", 0) - (s["paid_cash"] or 0))
-                    room = max(0, min(can, channels[channel_id] - previous - short - legacy - cash_other,
-                                      verified - done.get("transfer", 0) - legacy - cash_other))
+                    room = min(can, capacity["transfer", channel_id])
                     if refund > room:
                         raise Conflict(f"المبلغ المتاح للرد للمحفظة الأصلية {egp(room)} ج",
                                        code="refund_exceeds_method", details={"max_transfer": room, "refund": refund})
@@ -1707,13 +1697,20 @@ class Sales:
                     raise Conflict(f"هذا الجزء من الفاتورة كان آجلًا على حساب العميل فلا يُرد {how} (الحد الأقصى"
                                    f" {egp(can)} ج)؛ أعد الباقي على حساب العميل",
                                    code="cash_refund_exceeds_paid", details={"max_cash": can, "refund": refund})
-            if refund_method == "original" or (_exchange and refund_method == "card"):
+            if refund_method == "credit" and refunds.has_multiple_tenders(self.db, ctx.org_id, s):
+                limit = dict(refunds.original_capacity(self.db, ctx, s, 0))["credit", None]
+                if refund > limit:
+                    raise Conflict(f"المبلغ المتاح للرد على حساب العميل {egp(limit)} ج",
+                                   code="refund_exceeds_method", details={"max_credit": limit, "refund": refund})
+
+            if refund_method in ("original", "card"):
                 payments = refunds.allocate(self.db, ctx, s, refund, rounding_back,
                                              0 if emptied else max(0, s["rounding"]),
                                              only="card" if refund_method == "card" else None)
                 # A zero-value return still needs an event and its stock history.
                 if not payments:
-                    payments = [{"method": "cash", "channel_id": None, "amount": 0}]
+                    payments = [{"method": "cash" if refund_method == "original" else refund_method,
+                                 "channel_id": None, "amount": 0}]
             else:
                 payments = [{"method": refund_method, "channel_id": channel_id, "amount": refund}]
 
@@ -1747,12 +1744,8 @@ class Sales:
                         cash.record(self.db, ctx, -amount, "refund", pay_id, reason, branch_id=s["branch_id"])
                 if method in money.METHODS and amount:
                     note = f"مرتجع فاتورة {s['sale_no']}"
-                    if refund_method == "card" and not _exchange:
-                        money.reverse_sale(self.db, ctx, sid, amount, ref_type="sale_return", note=note,
-                                           meta={"return_id": pay_id, "method": "card"}, card_only=True)
-                    else:
-                        electronic[pay_id] = money.refund_tender(self.db, ctx, sid, method, channel, amount,
-                                                                return_id=pay_id, note=note)
+                    electronic[pay_id] = money.refund_tender(self.db, ctx, sid, method, channel, amount,
+                                                            return_id=pay_id, note=note, deferred=_exchange)
             # The sale stores the unrounded value of the returned items.
             self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=? AND org_id=?",
                             (refund - rounding_back, sid, ctx.org_id))
@@ -1766,6 +1759,7 @@ class Sales:
                          after={"return_id": rid, "refund": refund, "method": refund_method, "lines": lines,
                                 "line_refunds": line_refunds, "rounding": rounding_back or None,
                                 **({"refund_payments": payments} if refund_method == "original" else {}),
+                                **({"exchange_sale_id": _exchange_sale_id} if _exchange_sale_id else {}),
                                 **({"cash_override": True, "reason": reason.strip()} if cash_override else {}),
                                 **({"channel_id": channel_id, "wallet_account_id": wallet_parts[0][0] if wallet_parts else None}
                                    if refund_method == "transfer" else {}),
@@ -1868,6 +1862,7 @@ class Sales:
         place up to R, so the two cancel out, and only the net is settled: N > R -> the customer pays N - R by
         `pay_method`; N < R -> he gets R - N back by `refund_method`. The returned goods go back to stock as a
         sale return (never a purchase). Returns {"returned": R, "new_total": N, "net": N - R, ...}."""
+        from ..finance import money
         from .refunds import exchange_due, exchange_parts
 
         ctx.require("sales.return")
@@ -1912,7 +1907,7 @@ class Sales:
             if not repriced:
                 # an exchange never pays out the kept change: it stays his credit (Codex P1 on #424)
                 ret = self.return_items(ctx, sid, lines, refund_method=refund_method, give_back_change=False,
-                                        reason=reason, channel_id=refund_channel_id, _exchange=True)
+                                        reason=reason, channel_id=refund_channel_id, _exchange=True, _exchange_sale_id=new_sid)
                 r_value = ret["refund"]
                 n_total = self.get(ctx, new_sid)["total"]
                 if expected_new_total is not None and n_total != expected_new_total:   # not what the screen showed
@@ -1926,10 +1921,15 @@ class Sales:
                 offsets = []
                 for part, take in exchange_parts(ret["refund_payments"], n_total):
                     method, channel = part["method"], part["channel_id"]
-                    if take and method in ("card", "transfer"):
+                    if take:
+                        self.db.execute("UPDATE sale_returns SET exchange_offset=? WHERE org_id=? AND id=?",
+                                        (take, ctx.org_id, part["id"]))
+                    if method in money.METHODS:
                         remaining = take
-                        for account, posted in ret["_electronic"][part["id"]]:
+                        for account, posted in ret["_electronic"].get(part["id"], []):
                             kept = min(remaining, posted)
+                            money.post_tender_refund(self.db, ctx, sid, method, channel, account, posted,
+                                                     return_id=part["id"], note=reason, offset=kept)
                             if kept:
                                 offsets.append({"method": method, "channel_id": channel, "amount": kept,
                                                 "source_account": account})
@@ -1937,7 +1937,6 @@ class Sales:
                     elif take:
                         offsets.append({"method": method, "channel_id": None, "amount": take})
                 if cash_back:
-                    from ..finance import money
                     money.drawer_check(self.db, ctx, cash_back, orig["branch_id"])
                 extra = max(0, n_total - r_value)
                 payments = [{"method": pay_method, "amount": extra, "channel_id": channel_id}] if extra else []
@@ -1978,9 +1977,14 @@ class Sales:
         a = self.db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale' AND entity_id=?"
                         " AND action='sale.return' AND json_extract(after_json, '$.return_id')=?",
                         (ctx.org_id, r["sale_id"], rid))      # org_id first: the audit index, not a scan of the whole log
-        qty = json.loads(a["after_json"]).get("lines", {}) if a else {}
+        event = json.loads(a["after_json"]) if a else {}
+        qty = event.get("lines", {})
         lines = [{**l, "returned_now": int(qty[l["id"]])} for l in sale["lines"] if l["id"] in qty]
-        return {"return": r, "sale": sale, "lines": lines, "refund_payments": parts}
+        replacement = event.get("exchange_sale_id")
+        exchange = self.db.one("SELECT after_json FROM audit_log WHERE org_id=? AND entity_type='sale' AND entity_id=?"
+                               " AND action='sale.exchange'", (ctx.org_id, replacement)) if replacement else None
+        return {"return": r, "sale": sale, "lines": lines, "refund_payments": parts,
+                "exchange": json.loads(exchange["after_json"]) if exchange else None}
 
     def void(self, ctx: Context, sid: str, reason: str) -> dict:
         ctx.require("sales.void")

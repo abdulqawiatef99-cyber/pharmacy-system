@@ -123,6 +123,7 @@ class TestMixedRefund(WiringCase):
 
     def test_electronic_exchange_cheaper_equal_dearer_keeps_original_account(self):
         from app.catalog import service
+        from app.finance import money
         for method, account, channel in (("card", self.paymob, self.card_ch), ("transfer", self.wallet, self.tr_ch)):
             for price in (1700, 2000, 2400):
                 with self.subTest(method=method, price=price):
@@ -135,6 +136,7 @@ class TestMixedRefund(WiringCase):
                     sid = self.draft()
                     draft = self.line(sid, item, units=1)
                     original_balance, drawer = self.bal(account), self.drawer()
+                    before = money.summary(self.db, self.ctx, self.today, self.today)
                     path = f"/api/sales/{sale['id']}/exchange"
                     payload = {"new_sale_id": sid, "lines": {sale["lines"][0]["id"]: 1}, "refund_method": "original",
                                "reason": "استبدال تجربة", "version": draft["version"], "request_id": sid}
@@ -146,6 +148,9 @@ class TestMixedRefund(WiringCase):
                     self.assertEqual(self.call("POST", path, json=payload)["return_id"], out["return_id"])
                     self.assertEqual(self.bal(account) - original_balance, min(0, price - 2000))
                     self.assertEqual(self.drawer() - drawer, max(0, price - 2000))
+                    flow = money.summary(self.db, self.ctx, self.today, self.today)
+                    self.assertEqual((flow["total_in"] - before["total_in"], flow["total_out"] - before["total_out"]),
+                                     (max(0, price - 2000), max(0, 2000 - price)))
                     self.assertEqual(out["sale"]["payments"][0]["channel"], sale["payments"][0]["channel"])
                     self.assertEqual(self.split(self.refund(out["sale"]))[0], (method, min(price, 2000)))
 
@@ -181,3 +186,114 @@ class TestMixedRefund(WiringCase):
         rounding = self.db.all("SELECT refund_method, rounding FROM sale_returns WHERE rounding<>0")
         self.assertEqual([tuple(r) for r in rounding], [("cash", 49)])
         self.assertEqual(self.drawer(), 10000)
+
+    def test_approved_cash_override_cannot_use_an_unverified_wallet(self):
+        from dataclasses import replace
+        from app.core.errors import Conflict
+        from app.sales.service import Sales
+        approved = replace(self.ctx, approver_id="manager-fixture",
+                           approver_permissions=frozenset({"sales.refund_other_method"}))
+        sale = self.sale(wallet=1000)
+        with self.assertRaises(Conflict) as error:
+            Sales(self.db).return_items(approved, sale["id"], {sale["lines"][0]["id"]: 1},
+                                        refund_method="cash", reason="سبب تجربة")
+        self.assertEqual(error.exception.details["max_cash"], 1000)
+        self.assertEqual((self.drawer(), self.qty(self.pan)), (11000, 19))
+
+    def test_card_funded_cash_exception_keeps_verified_wallet_available(self):
+        sale = self.sale(cash=500, card=1500, wallet=2000, units=2)
+        self.verify_wallet(sale)
+        from dataclasses import replace
+        from app.sales.service import Sales
+        approved = replace(self.ctx, approver_id="manager-fixture",
+                           approver_permissions=frozenset({"sales.refund_other_method"}))
+        service = Sales(self.db)
+        line = {sale["lines"][0]["id"]: 1}
+        service.return_items(approved, sale["id"], line, refund_method="cash", reason="سبب تجربة")
+        paid = service.return_items(self.ctx, sale["id"], line, refund_method="transfer", reason="سبب تجربة",
+                                    channel_id=self.tr_ch)
+        self.assertEqual(self.split(paid), [("transfer", 2000)])
+        self.assertEqual((self.drawer(), self.bal(self.wallet)), (8500, 0))
+
+    def legacy_card_refund(self, sale, wallet_account=None):
+        from unittest.mock import patch
+        from app.core import audit
+        from app.finance import money
+        original_post, original_audit = money._post, audit.record
+
+        def post(db, ctx, account, amount, kind, **kwargs):
+            if kind == "refund" and kwargs.get("ref_type") == "sale_return":
+                kwargs["meta"] = {k: v for k, v in kwargs["meta"].items() if k != "channel_id"}
+                account = wallet_account or account
+            return original_post(db, ctx, account, amount, kind, **kwargs)
+
+        def record(db, ctx, action, *args, **kwargs):
+            if wallet_account and action == "sale.return":
+                kwargs["after"] = {k: v for k, v in kwargs["after"].items() if k != "card_only"}
+            return original_audit(db, ctx, action, *args, **kwargs)
+
+        with patch.object(money, "_post", side_effect=post), patch.object(audit, "record", side_effect=record):
+            first = self.refund(sale, method="card")
+        with self.db.transaction():
+            self.db.execute("UPDATE sale_returns SET channel_id=NULL WHERE id=?", (first["return_id"],))
+
+    def test_legacy_null_card_refund_does_not_consume_both_channels_on_shared_account(self):
+        from app.sales import channels
+        alternate = next(c["id"] for c in channels.save(self.db, self.ctx, {
+            "name": "بطاقة ثانية", "kind": "card", "account_id": self.paymob}) if c["name"] == "بطاقة ثانية")
+        sid = self.draft()
+        self.line(sid, self.pan, units=2)
+        sale = self.complete(sid, [{"method": "card", "channel_id": c, "amount": 2000}
+                                   for c in (self.card_ch, alternate)])
+        self.legacy_card_refund(sale)
+        final = self.refund(sale)
+        self.assertEqual([(p["channel_id"], p["amount"]) for p in final["refund_payments"]], [(alternate, 2000)])
+        self.assertEqual(self.bal(self.paymob), 0)
+
+    def test_legacy_card_label_on_wallet_debit_leaves_card_available(self):
+        sale = self.sale(cash=0, card=2000, wallet=2000, units=2)
+        self.verify_wallet(sale)
+        self.legacy_card_refund(sale, wallet_account=self.wallet)
+        self.assertEqual(self.split(self.refund(sale)), [("card", 2000)])
+        self.assertEqual((self.bal(self.paymob), self.bal(self.wallet)), (0, 0))
+
+    def test_approved_cash_from_two_verified_wallets_consumes_the_amount_once(self):
+        from app.sales import channels
+        alternate = next(c["id"] for c in channels.listing(self.db, self.ctx)
+                         if c["kind"] == "transfer" and c["id"] != self.tr_ch)
+        sid = self.draft()
+        self.line(sid, self.pan, units=2)
+        sale = self.complete(sid, [{"method": "transfer", "channel_id": c, "amount": 2000}
+                                   for c in (self.tr_ch, alternate)])
+        self.verify_wallet(sale)
+        from dataclasses import replace
+        from app.sales.service import Sales
+        approved = replace(self.ctx, approver_id="manager-fixture",
+                           approver_permissions=frozenset({"sales.refund_other_method"}))
+        Sales(self.db).return_items(approved, sid, {sale["lines"][0]["id"]: 1},
+                                    refund_method="cash", reason="سبب تجربة")
+        final = self.refund(sale)
+        self.assertEqual([(p["channel_id"], p["amount"]) for p in final["refund_payments"]], [(alternate, 2000)])
+
+    def test_explicit_account_refund_on_mixed_sale_is_capped_by_original_credit(self):
+        customer = self.call("POST", "/api/customers", 201, json={"name": "عميل تجربة", "credit_limit": 100000})["id"]
+        sale = self.sale(cash=1000, credit=1000, customer=customer)
+        err = self.refund(sale, method="credit", status=409)["error"]
+        self.assertEqual(err["details"]["max_credit"], 1000)
+        self.assertEqual(self.call("GET", f"/api/customers/{customer}")["balance"], 1000)
+
+    def test_cheaper_mixed_exchange_reports_only_external_cash_back(self):
+        from app.finance import money
+        sale = self.sale(cash=1000, card=1000)
+        sid = self.draft()
+        self.line(sid, self.pan, units=1)
+        from app.sales.service import Sales
+        Sales(self.db).update_line(self.ctx, sid, self.db.one("SELECT id FROM sale_lines WHERE sale_id=?", (sid,))[0],
+                                   discount_amount=300)
+        before = money.summary(self.db, self.ctx, self.today, self.today)
+        out = self.call("POST", f"/api/sales/{sale['id']}/exchange", json={
+            "new_sale_id": sid, "lines": {sale["lines"][0]["id"]: 1}, "refund_method": "original",
+            "reason": "استبدال تجربة"})
+        self.assertEqual(self.split({"refund_payments": out["refund_due"]}), [("cash", 300)])
+        after = money.summary(self.db, self.ctx, self.today, self.today)
+        self.assertEqual((after["total_in"] - before["total_in"], after["total_out"] - before["total_out"]), (0, 300))
