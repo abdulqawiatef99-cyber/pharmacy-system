@@ -76,3 +76,26 @@ class TestTabAudit(SalesCase):
                          (1, left, 1, removed["net"]))
         self.assertIn("تبويبات اتقفلت بأصناف", r["text"])
         self.assertIn("أصناف اتشالت من الفاتورة", r["text"])
+
+    # review of SEC8: lowering a quantity is the same theft as removing the line (P1-1)
+    def test_lowering_a_quantity_is_audited_with_the_value_taken_off(self):
+        sid, d = self.tab((2, 3))
+        line = d["lines"][1]
+        after = self.s.update_line(self.ctx, sid, line["id"], qty_base=1)
+        now = next(l for l in after["lines"] if l["id"] == line["id"])
+        [row] = self.rows("sale.line_reduced")
+        a = json.loads(row["after_json"])
+        self.assertEqual((row["entity_id"], a["items"], a["units"], a["value"]),
+                         (self.shift, 1, line["qty_base"] - 1, line["net"] - now["net"]))
+        self.s.update_line(self.ctx, sid, line["id"], qty_base=3)           # raising it is not a loss
+        self.assertEqual(len(self.rows("sale.line_reduced")), 1)
+
+    # review of SEC8: a tab built on a device with no drawer still lands on the branch's open shift (P1-2)
+    def test_a_device_without_a_drawer_is_counted_on_the_open_shift(self):
+        from dataclasses import replace
+        phone = replace(self.ctx, register_id=None)
+        sid = self.s.create(phone)
+        self.s.add_line(phone, sid, self.pan, units=1)
+        self.s.discard(phone, sid)
+        [row] = self.rows("sale.tab_discarded")
+        self.assertEqual((row["entity_type"], row["entity_id"]), ("cash_shift", self.shift))
