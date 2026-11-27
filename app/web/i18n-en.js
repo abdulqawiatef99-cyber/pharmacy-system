@@ -3647,4 +3647,7 @@ window.I18N_EN = {
 "مفصّل": "Detailed",
 "⚠ تشكيل الحروف العربية (raqm) غير متاح على هذا الجهاز: سيُطبع الإيصال من المتصفح، ولن يُفتح الدرج إلا إذا اختيرت الطابعة.": "⚠ Arabic shaping (raqm) is not available on this computer: the receipt will print from the browser, and the drawer opens only if a printer is chosen.",
 "بيانات تجريبية": "Sample data",
+"بيحلل… 0 من 0 سطر": "Analysing… 0 of 0 rows",
+"بيقرا الملف…": "Reading the file…",
+"ملف كبير (آلاف الأسطر) بياخد دقايق في التحليل، والبيع شغال عادي في الوقت ده.": "A large file (thousands of rows) takes minutes to analyse; selling keeps working meanwhile.",
 };

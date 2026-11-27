@@ -41,7 +41,7 @@ from ..core import accounts, approvals, audit, idempotency, notify, people
 from ..core.errors import Conflict, DomainError, Forbidden, NotFound, Unauthorized, ValidationFailed
 from ..core.numbers import whole_number
 from ..finance import money, reconcile
-from ..db import Database
+from ..db import Database, new_id
 from ..inventory import service as inventory
 from ..purchasing import entry_settings
 from ..purchasing.service import Purchasing
@@ -2062,9 +2062,59 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if mapping is not None and not (isinstance(mapping, dict) and all(
                 k.isdigit() and isinstance(v, str) for k, v in mapping.items())):
             raise ValidationFailed("قيم غير صحيحة")
-        run = dimp.analyze(ctx, data, name, kind=fields.get("kind") or "items", mapping=mapping,
-                           source_system=fields.get("source_system") or "generic", options=options)
-        return J(dimp.get(ctx, run), status_code=201)
+        kwargs = dict(kind=fields.get("kind") or "items", mapping=mapping,
+                      source_system=fields.get("source_system") or "generic", options=options)
+        if fields.get("background") == "1":     # QA-29: a job with progress; the screen asks for it
+            return J({"job": _start_import_job(ctx, data, name, kwargs)}, status_code=202)
+        # QA-29: in a worker thread; on the event loop a 20,000-row file stopped every request for 164 s
+        run = await run_in_threadpool(lambda: dimp.analyze(ctx, data, name, **kwargs))
+        return J(await run_in_threadpool(dimp.get, ctx, run), status_code=201)
+
+    # QA-29: background analysis jobs, in memory (an analysis writes nothing until its end, so a restart only
+    # loses the job, never half a run). One running job per person; a finished job is kept for an hour.
+    import_jobs: dict[str, dict] = {}
+    import_jobs_lock = threading.Lock()
+    import_job_tasks: set = set()
+
+    def _start_import_job(ctx, data: bytes, name: str, kwargs: dict) -> str:
+        now = time.monotonic()
+        with import_jobs_lock:
+            for k in [k for k, j in import_jobs.items() if j["status"] != "running" and now - j["at"] > 3600]:
+                import_jobs.pop(k)
+            if any(j["status"] == "running" and j["org_id"] == ctx.org_id and j["user_id"] == ctx.user_id
+                   for j in import_jobs.values()):
+                raise Conflict("فيه ملف لسه بيتحلل، استنى لما يخلص", code="import_running")
+            job_id = new_id()
+            job = import_jobs[job_id] = {"org_id": ctx.org_id, "user_id": ctx.user_id, "status": "running",
+                                         "done": 0, "total": None, "run_id": None, "error": None, "at": now}
+
+        def progress(done, total):
+            job["done"], job["total"] = done, total
+
+        def run():
+            try:
+                rid = dimp.analyze(ctx, data, name, progress=progress, **kwargs)
+                job.update(run_id=rid, status="done", done=job["total"] or 0)
+            except DomainError as e:
+                job.update(status="failed", error={"code": e.code, "message": e.message, "details": e.details})
+            except Exception:
+                log.exception("import analysis failed")
+                job.update(status="failed", error={"code": "internal", "message": "حدث خطأ غير متوقع", "details": {}})
+            finally:
+                job["at"] = time.monotonic()
+        task = asyncio.get_running_loop().run_in_executor(None, run)
+        import_job_tasks.add(task)
+        task.add_done_callback(import_job_tasks.discard)
+        return job_id
+
+    @handler
+    async def import_job(req):
+        ctx = ctx_of(req)
+        ctx.require("items.import")
+        job = import_jobs.get(req.path_params["id"])
+        if not job or job["org_id"] != ctx.org_id or job["user_id"] != ctx.user_id:
+            raise NotFound("المهمة غير موجودة")
+        return J({k: job[k] for k in ("status", "done", "total", "run_id", "error")})
 
     @handler
     async def import_get(req):
@@ -2080,7 +2130,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     @handler
     async def import_apply(req):
         ctx = ctx_of(req)
-        return J(dimp.apply(ctx, req.path_params["id"]))
+        return J(await run_in_threadpool(dimp.apply, ctx, req.path_params["id"]))      # QA-29: off the loop
 
     @handler
     async def import_discard(req):
@@ -3598,6 +3648,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/files/{id}", file_get),
         Route("/api/imports", import_analyze, methods=["POST"]),
         Route("/api/imports/templates/{kind}.xlsx", import_template),
+        Route("/api/imports/jobs/{id}", import_job),
         Route("/api/imports/{id}", import_get),
         Route("/api/imports/{id}/decide", import_decide, methods=["POST"]),
         Route("/api/imports/{id}/apply", import_apply, methods=["POST"]),
