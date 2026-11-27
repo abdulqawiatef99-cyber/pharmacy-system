@@ -35,6 +35,7 @@ function printInFrame(u) { pages.push(u); }
 function toast(m, bad) { toasts.push([m, !!bad]); }
 async function api(path) {
   if (path === "/api/settings/receipt") { asked++; return { label_lang: asked === 1 ? "ar" : "browser" }; }
+  if (path.endsWith("&check=1")) return { ok: true };        // QA-29: the label page is checked before printing
   const e = new Error("browser"); e.code = "labels_in_browser"; throw e;
 }
 """ + fn + """

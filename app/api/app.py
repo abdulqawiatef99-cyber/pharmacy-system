@@ -2397,7 +2397,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(counting.record(ctx, req.path_params["id"], item_id=str(b.get("item_id", "")),
                                  qty=qty, batch_id=b.get("batch_id"),
                                  location=str(b.get("location") or ""), mode=b.get("mode", "set"),
-                                 recount=bool(b.get("recount")), device=req.headers.get("user-agent", "")[:80]))
+                                 recount=bool(b.get("recount")), device=req.headers.get("user-agent", "")[:80],
+                                 confirm_repeat=b.get("confirm_repeat") is True))
 
     @handler
     async def counts_variances(req):
@@ -3154,6 +3155,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 raise ValidationFailed("الفكة غير صحيحة")
             if not 0 <= fl <= total:
                 raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large")
+        elif b.get("empty_float"):      # the closer emptied the box: preview the close's own default (QA-31)
+            from ..sales.cash import open_shift_id
+            sid = b.get("shift_id") if isinstance(b.get("shift_id"), str) else None
+            sid = sid or open_shift_id(db, ctx)
+            row = db.one("SELECT opening_cash FROM cash_shifts WHERE id=? AND org_id=? AND branch_id=? AND status='open'",
+                         (sid, ctx.org_id, ctx.branch_id)) if sid else None
+            wanted = min(row["opening_cash"] if row else 0, total)
+            fl = shift_tools.default_float(clean, wanted, total)
+            return J({**shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl), "wanted": wanted})
         return J(shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl))
 
     @handler
@@ -3438,6 +3448,25 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <p class="f">{e(cfg['footer'])}</p>{policy}{bottom_qr}</div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
+    def _label_barcode_ok(cfg: dict, it, data: dict) -> None:
+        """QA-29: a barcode that cannot be drawn (Code 128 is English letters and digits only; an Arabic item code
+        with no barcode) is refused with what to do, before anything prints. It was a 500 inside the hidden print
+        frame: nothing printed and nothing was said."""
+        from ..printing import barcode as bc
+        if not cfg["label_fields"].get("barcode"):
+            return
+        try:
+            bc.svg(data["value"])
+            return
+        except ValueError:
+            pass
+        name = it["name_ar"] or it["name_en"] or it["code"] or ""
+        why = (f"الكود «{data['value']}» فيه حروف مش إنجليزي، والباركود بيتطبع بحروف إنجليزية وأرقام بس"
+               if data["value"] else "مالوش باركود ولا كود يتطبع")
+        raise ValidationFailed(f"ملصق «{name}»: {why}. ضيف باركود للصنف، أو غيّر الكود لحروف إنجليزية وأرقام،"
+                               " أو اطبع الملصق من غير باركود (إعدادات الملصق).", code="label_barcode",
+                               details={"item_id": it["id"]})
+
     @handler
     async def labels_page(req):
         """Barcode labels for browser printing: ?items=<id>:<count>,... — the owner's fields and size (#84),
@@ -3459,6 +3488,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if not it or (it["hidden"] and not ctx.can("items.hidden")):
                 continue
             data = ps.label_data(db, ctx, it, cfg)
+            _label_barcode_ok(cfg, it, data)
             try:
                 on, _dropped = lb.layout(cfg["label_fields"], data, w, h, cfg["label_dpi"])
             except lb.PrinterError as err:
@@ -3475,6 +3505,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             cells += [f'<div class="lb">{top}{mark}{content}</div>'] * n
         if not cells:
             raise ValidationFailed("اختر الأصناف")
+        if req.query_params.get("check") == "1":       # QA-29: the screen asks first; nothing printed, nothing recorded
+            return Response(status_code=204)
         with db.transaction():
             audit.record(db, ctx, "print.labels", "item", None, after={"labels": len(cells), "size": f"{w:g}x{h:g}"})
         a4 = cfg["label_lang"] == "a4"
@@ -3572,7 +3604,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         for x in (b.get("items") or [])[:200]:
             if isinstance(x, dict) and x.get("id"):
                 wanted.append((str(x["id"]), x.get("count", 1)))
-        return J(await run_in_threadpool(ps.print_labels, db, ctx, wanted, size=b.get("size")))
+
+        def run():
+            from ..printing import settings as rs
+            ctx.require("items.read")                  # before the check names an item (review P2)
+            cfg = ps.label_config(db, ctx, rs.get(db, ctx.org_id))    # this device's own label printer wins
+            if cfg["label_lang"] not in ("browser", "a4"):          # QA-29: refused with a reason, before the printer
+                for iid, _n in wanted:
+                    it = db.one("SELECT * FROM items WHERE id=? AND org_id=?", (iid, ctx.org_id))
+                    if it and not (it["hidden"] and not ctx.can("items.hidden")):
+                        _label_barcode_ok(cfg, it, ps.label_data(db, ctx, it, cfg))
+            return ps.print_labels(db, ctx, wanted, size=b.get("size"))
+        return J(await run_in_threadpool(run))
 
     @handler
     async def receipt_logo(req):

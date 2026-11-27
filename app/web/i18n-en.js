@@ -3746,6 +3746,12 @@ window.I18N_EN = {
 "اكتب": "Type",
 "أقل عدد حروف 0": "At least 0 characters",
 "أقصى عدد حروف 0": "At most 0 characters",
+"ماتضافش تاني": "Not added again",
+"✓ اتحفظ البيع — فاتورة 0 0": "✓ Sale saved — invoice 0 0",
+"✓ اتحفظ البيع —": "✓ Sale saved —",
 "هذا الجهاز: اعرف الدرج اللي المتصفح مربوط بيه.": "This device: see which drawer this browser is linked to.",
 "المالك أو المدير يقدر يربط درج ويضبط طابعاته من هنا.": "The owner or manager can link a drawer and configure its printers here.",
+"⚠ الفئات اللي عدّيتها ما تعملش فكة 0 ج بالظبط، فهيفضل في الدرج 0 ج بس": "⚠ The counted notes cannot make a float of exactly 0 EGP, so only 0 EGP will stay in the drawer",
+"هيفضل في الدرج 0 ج، ويتحوّل للخزنة 0 ج. تكمّل التقفيل؟": "0 EGP will stay in the drawer and 0 EGP will move to the treasury. Close the shift?",
+"العدد اتغيّر وانت بتأكد. راجع الأرقام واضغط إغلاق الشيفت تاني": "The count changed while you were confirming. Check the numbers and press Close shift again",
 };

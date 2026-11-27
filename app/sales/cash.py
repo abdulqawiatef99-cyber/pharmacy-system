@@ -325,7 +325,7 @@ class CashDrawer:
             split = None
             if detail and float_left is None and left:
                 # nobody typed a float: the default (the opening cash) becomes what the notes can make (review of #500)
-                left = shift_tools.largest_makeable(detail, left)
+                left = shift_tools.default_float(detail, left, counted_cash)
             if detail:
                 split = shift_tools.split_for(detail, shift_tools.get_target(self.db, ctx.org_id), left)
                 if split.get("exact") is False:
