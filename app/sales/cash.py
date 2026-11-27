@@ -156,7 +156,7 @@ def shift_void_filters(s) -> list[tuple[str, tuple]]:
         close = s["closed_at"] or "9999-12-31"
         day0 = local_day_bounds(_local_date(s["opened_at"]))[0]
         filters.extend([
-            ("x.org_id=? AND x.shift_id=? AND x.void_register_recorded=0 AND x.voided_at<?",
+            ("+x.org_id=? AND x.shift_id=? AND x.void_register_recorded=0 AND x.voided_at<?",
              (s["org_id"], s["id"], close)),
             ("x.org_id=? AND x.branch_id=? AND x.completed_at>=? AND x.completed_at<?"
              " AND (x.shift_id IS NULL OR x.shift_id<>?) AND x.void_register_recorded=0"

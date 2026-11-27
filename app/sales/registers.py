@@ -60,8 +60,10 @@ def require_current(db: Database, ctx: Context, branch_id: str | None = None) ->
 
 
 def status(db: Database, ctx: Context) -> dict:
-    bound = current(db, ctx)
     manager = can_manage(ctx)
+    if not manager:
+        ctx.require("sales.read")
+    bound = current(db, ctx)
     rows = db.all(f"SELECT {PUBLIC_COLUMNS} FROM registers WHERE org_id=? AND branch_id=? ORDER BY id",
                   (ctx.org_id, ctx.branch_id)) if manager else []
     return {"current": dict(bound) if bound else None, "can_manage": manager, "registers": [dict(r) for r in rows]}

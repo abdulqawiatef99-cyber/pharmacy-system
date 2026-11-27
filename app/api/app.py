@@ -1594,7 +1594,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def register_update(req):
-        return J(registers.save(db, ctx_of(req), await body(req), req.path_params["id"]))
+        ctx = ctx_of(req)
+        rid = _int(req.path_params["id"], "الدرج")
+        return J(registers.save(db, ctx, await body(req), rid))
 
     @handler
     async def register_bind(req):
@@ -3753,7 +3755,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/print/label-calibrate", print_label_calibrate, methods=["POST"]),
         Route("/api/settings/registers", register_settings, methods=["GET", "POST"]),
         Route("/api/settings/registers/bind", register_bind, methods=["POST"]),
-        Route("/api/settings/registers/{id:int}", register_update, methods=["PATCH"]),
+        Route("/api/settings/registers/{id}", register_update, methods=["PATCH"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
         Route("/api/cash/movements", cash_move, methods=["POST"]),

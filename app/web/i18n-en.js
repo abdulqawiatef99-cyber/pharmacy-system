@@ -3720,4 +3720,6 @@ window.I18N_EN = {
 "اكتب": "Type",
 "أقل عدد حروف 0": "At least 0 characters",
 "أقصى عدد حروف 0": "At most 0 characters",
+"هذا الجهاز: اعرف الدرج اللي المتصفح مربوط بيه.": "This device: see which drawer this browser is linked to.",
+"المالك أو المدير يقدر يربط درج ويضبط طابعاته من هنا.": "The owner or manager can link a drawer and configure its printers here.",
 };
