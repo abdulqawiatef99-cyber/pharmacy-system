@@ -9,6 +9,7 @@ window.I18N_EN = {
 "مريح": "Comfortable",
 "مضغوط": "Compact",
 "روابط البيع": "Sale links",
+"البيع السريع": "Quick sale",
 "تفاصيل الفاتورة": "Invoice details",
 "قواعد رد المدفوعات": "Refund rules",
 "حسب الأولوية": "By priority",
