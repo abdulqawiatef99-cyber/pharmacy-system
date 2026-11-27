@@ -326,17 +326,70 @@ def _take(allocs: list[dict], kept: dict, qty: int) -> None:
             break
 
 
-def returns_history(db: Database, org_id: str, sale_ids) -> dict[str, list[dict]]:
+def returns_history(db: Database, org_id: str, sale_ids, *, dated: bool = False) -> dict[str, list[dict]]:
     """The `sale.return` audit rows of these sales, oldest first, as {sale_id: [after, ...]}: what each return
     took from which line (and, since #324 M1, what it refunded per line). Few queries, on the audit index."""
     ids, out = sorted(set(sale_ids)), {}
+    booking = ", coalesce(r.created_at, a.at) returned_at" if dated else ""
+    join = (" LEFT JOIN sale_returns r ON r.org_id=a.org_id AND r.sale_id=a.entity_id"
+            " AND r.id=json_extract(a.after_json, '$.return_id')") if dated else ""
     for k in range(0, len(ids), 500):
         part = ids[k:k + 500]
-        for r in db.all("SELECT entity_id, after_json FROM audit_log WHERE org_id=? AND entity_type='sale'"
-                        f" AND entity_id IN ({','.join('?' * len(part))}) AND action='sale.return'"
-                        " ORDER BY entity_id, at, rowid", (org_id, *part)):
-            out.setdefault(r["entity_id"], []).append(json.loads(r["after_json"] or "{}"))
+        for r in db.all(f"SELECT a.entity_id, a.after_json{booking} FROM audit_log a{join}"
+                        " WHERE a.org_id=? AND a.entity_type='sale'"
+                        f" AND a.entity_id IN ({','.join('?' * len(part))}) AND a.action='sale.return'"
+                        " ORDER BY a.entity_id, a.at, a.rowid", (org_id, *part)):
+            after = json.loads(r["after_json"] or "{}")
+            if dated:
+                after["returned_at"] = r["returned_at"]
+            out.setdefault(r["entity_id"], []).append(after)
     return out
+
+
+def kept_at(allocs: list[dict], line_id: str, history: list[dict], end: str) -> dict[str, int]:
+    """Units still kept just before end. Undo later returns in reverse allocation order."""
+    kept = {a["id"]: a["qty_base"] - a["returned_qty"] for a in allocs}
+    later_qty = sum(int((r.get("lines") or {}).get(line_id) or 0) for r in history if r["returned_at"] >= end)
+    if later_qty:
+        for a in sorted(allocs, key=lambda a: a["rid"]):
+            restored = min(later_qty, a["returned_qty"])
+            kept[a["id"]] += restored
+            later_qty -= restored
+            if not later_qty:
+                break
+    return kept
+
+
+# The original invoice supplies the branch. The return supplies the date and the refunded amount.
+RETURN_ACTIVITY = (
+    " FROM sale_returns r JOIN sales s ON s.id=r.sale_id AND s.org_id=r.org_id"
+    " WHERE r.org_id=? AND s.branch_id=? AND r.created_at>=? AND r.created_at<?"
+)
+
+
+def day_return_cost(db: Database, org: str, branch: str, start: str, end: str) -> tuple[Decimal, int]:
+    ids = [r["sale_id"] for r in db.all("SELECT DISTINCT r.sale_id" + RETURN_ACTIVITY, (org, branch, start, end))]
+    history = returns_history(db, org, ids, dated=True)
+    cost, unknown = Decimal(0), 0
+    for k in range(0, len(ids), 500):
+        part = ids[k:k + 500]
+        lines = {}
+        for a in db.all(
+                "SELECT a.id, a.rowid rid, a.qty_base, a.returned_qty, a.unit_cost, l.id lid, l.sale_id, s.completed_at"
+                " FROM sale_lines l JOIN sales s ON s.id=l.sale_id AND s.org_id=l.org_id"
+                " JOIN sale_allocations a ON a.sale_line_id=l.id"
+                f" WHERE l.org_id=? AND l.sale_id IN ({','.join('?' * len(part))})", (org, *part)):
+            lines.setdefault((a["lid"], a["sale_id"], a["completed_at"]), []).append(dict(a))
+        for (lid, sid, sold_at), allocs in lines.items():
+            events = history.get(sid, [])
+            before, after = kept_at(allocs, lid, events, start), kept_at(allocs, lid, events, end)
+            for a in allocs:
+                n = before[a["id"]] - after[a["id"]]
+                if n and a["unit_cost"] is not None:
+                    cost += Decimal(a["unit_cost"]) * n
+                elif n and sold_at < start:
+                    unknown += 1      # same-day sales already count these allocations
+    return cost, unknown
 
 
 def outstanding_value(allocs: list[dict], kept: dict, bp: int, line_total: int | None, line_id: str,
@@ -1989,29 +2042,37 @@ class Sales:
                             details={"permission": "sales.totals"})
         d = date.fromisoformat(day) if day else local_today()
         lo, hi = local_day_bounds(d)
+        p = (ctx.org_id, ctx.branch_id, lo, hi)
+        with self.db.read_snapshot():
+            return self._day_summary(ctx, d, p)
+
+    def _day_summary(self, ctx: Context, day: date, p: tuple) -> dict:
         r = self.db.one("SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(paid_cash),0) cash,"
                         " coalesce(sum(paid_card),0) card, coalesce(sum(paid_transfer),0) transfer,"
-                        " coalesce(sum(on_credit),0) credit,"
-                        " coalesce(sum(returned_total),0) returns FROM sales WHERE org_id=? AND branch_id=?"
-                        " AND status='completed' AND completed_at >= ? AND completed_at < ?",
-                        (ctx.org_id, ctx.branch_id, lo, hi))
+                        " coalesce(sum(on_credit),0) credit, coalesce(sum(rounding),0) rounding"
+                        " FROM sales WHERE org_id=? AND branch_id=?"
+                        " AND status='completed' AND completed_at>=? AND completed_at<?", p)
+        refunds = self.db.one("SELECT coalesce(sum(r.total),0) total, coalesce(sum(r.rounding),0) rounding"
+                              + RETURN_ACTIVITY, p)
         out = dict(r)
-        out["day"] = d.isoformat()
+        out["day"] = day.isoformat()
+        out["refund_total"] = refunds["total"]
+        out["returns"] = refunds["total"] - refunds["rounding"]
+        out["rounding"] -= refunds["rounding"]
         if ctx.can("costs.read"):
-            cost = Decimal(0)
+            refunded_cost, unknown = day_return_cost(self.db, *p)
+            cost = -refunded_cost
             for a in self.db.all(
-                    "SELECT a.unit_cost, a.qty_base - a.returned_qty q FROM sale_allocations a"
-                    " JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id"
-                    " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed' AND s.completed_at >= ?"
-                    " AND s.completed_at < ?", (ctx.org_id, ctx.branch_id, lo, hi)):
-                if a["unit_cost"] is not None:
+                    "SELECT a.unit_cost, sum(a.qty_base) q, count(*) n FROM sale_allocations a"
+                    " JOIN sale_lines l ON l.id=a.sale_line_id JOIN sales s ON s.id=l.sale_id AND s.org_id=l.org_id"
+                    " WHERE s.org_id=? AND s.branch_id=? AND s.status='completed'"
+                    " AND s.completed_at>=? AND s.completed_at<? GROUP BY a.unit_cost", p):
+                if a["unit_cost"] is None:
+                    unknown += a["n"]
+                else:
                     cost += Decimal(a["unit_cost"]) * a["q"]
             cost = cost.quantize(Decimal("0.01"), ROUND_HALF_UP)        # rounded once: cost + profit = net
             out["cost_egp"] = str(cost)
             out["gross_profit_egp"] = str(Decimal(out["total"] - out["returns"]) / 100 - cost)
-            out["unknown_cost_lines"] = self.db.one(
-                "SELECT count(*) c FROM sale_allocations a JOIN sale_lines l ON l.id=a.sale_line_id"
-                " JOIN sales s ON s.id=l.sale_id WHERE s.org_id=? AND s.branch_id=? AND s.status='completed'"
-                " AND s.completed_at >= ? AND s.completed_at < ? AND a.unit_cost IS NULL",
-                (ctx.org_id, ctx.branch_id, lo, hi))["c"]
+            out["unknown_cost_lines"] = unknown
         return out
