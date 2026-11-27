@@ -15,6 +15,10 @@ const { chromium } = require('playwright');
 (async () => {
   const [base, user, pw, purchase, screen] = process.argv.slice(1);
 """ + LOGIN + r"""
+  await p.evaluate(async () => {
+    const { organization, user } = await (await fetch('/api/me')).json();
+    localStorage.setItem(`tour:${organization.id}:${user.id}`, JSON.stringify({ all: 1 }));
+  });
   await p.setViewportSize({ width: 1366, height: 768 });
   const sale = screen === 'sale';
   const table = sale ? 'table.cart' : 'table.lines';
@@ -46,6 +50,12 @@ const { chromium } = require('playwright');
     };
   }, [table, action]);
   const out = { initial: await snapshot() };
+  if (sale) {
+    await p.setViewportSize({ width: 1280, height: 1024 });
+    await p.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    out.tall = await snapshot();
+    await p.setViewportSize({ width: 1366, height: 768 });
+  }
   out.rtl = await p.locator(table).evaluate((t) => getComputedStyle(t).direction === 'rtl');
   await p.locator(table).evaluate((t) => { t.closest('.tablewrap').scrollTop = 1000; });
   out.scrolled = await snapshot();
@@ -62,14 +72,45 @@ const { chromium } = require('playwright');
       document.documentElement.dataset.theme = 'dark';
       return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     });
+    const compact = () => p.evaluate(() => {
+      const selectors = ['#posQ', '#posCust', '.sum.due', '[data-m="cash"]', '[data-m="card"]',
+                         '[data-m="transfer"]', '[data-m="credit"]', '#posDone', '#posDone kbd'];
+      return Object.fromEntries(selectors.map((selector) => {
+        const el = document.querySelector(selector), rect = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        return [selector, { visible: el.contains(hit) && rect.top >= 0 && rect.bottom <= innerHeight,
+                            top: rect.top }];
+      }));
+    });
+    out.shortBar = await compact();
     out.delivery = await snapshot();
     await p.focus('#posQ');
     await p.keyboard.press('F10');
     out.focus = await p.evaluate(() => document.querySelector("#posSide").contains(document.activeElement));
     out.deliveryAfterFocus = await snapshot();
     await p.setViewportSize({ width: 390, height: 650 });
+    await p.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    await p.locator(table).evaluate((t) => { t.closest(".tablewrap").scrollTop = 0; });
     out.phone = await snapshot();
-    out.dark = await p.locator('#posSide').evaluate((pane) => getComputedStyle(pane).colorScheme === 'dark');
+    out.dark = await p.locator('#posDone').evaluate((btn) => getComputedStyle(btn).colorScheme === 'dark');
+    out.phoneBar = await compact();
+    await p.locator(table).evaluate((t) => { t.closest('.tablewrap').scrollTop = 150; });
+    out.phoneBarAfterScroll = await compact();
+    await p.setViewportSize({ width: 1366, height: 768 });
+    await p.goto(base + '/#/me');
+    const choice = p.locator('input[name=density][value=comfortable]');
+    out.hasDensity = await choice.count();
+    if (out.hasDensity) {
+      out.compactDefault = await p.locator('input[name=density][value=compact]').isChecked();
+      const [response] = await Promise.all([
+        p.waitForResponse((r) => r.url().endsWith('/api/me/prefs') && r.request().method() === 'PUT'),
+        choice.check(),
+      ]);
+      out.savedDensity = (await response.json()).density;
+      await p.goto(base + '/#/pos');
+      await p.waitForSelector('table.cart tbody tr');
+      out.comfortable = await snapshot();
+    }
   } else {
     await p.evaluate(() => scrollTo(0, 250));
     out.purchaseAfterPageScroll = await snapshot();
@@ -122,6 +163,8 @@ class TestInvoiceViewport(APICase):
         out = run_node(self, SCRIPT, "owner", OWNER_PW, self.purchase_id, "sale")
         self.check_scrolling(out)
         self.assertGreater(out["initial"]["visible"], 4, out)
+        self.assertGreater(out["tall"]["visible"], out["initial"]["visible"], out)
+        self.assertTrue(out["tall"]["actionVisible"], out)
         self.assertTrue(out["lastSelected"], out)
         self.assertGreater(out["arrow"]["scroll"], 0, out)
         self.assertEqual(out["arrow"]["y"], out["initial"]["y"], out)
@@ -129,7 +172,14 @@ class TestInvoiceViewport(APICase):
         self.assertTrue(out["focus"], out)
         self.assertTrue(out["deliveryAfterFocus"]["actionVisible"], out)
         self.assertTrue(out["phone"]["actionVisible"], out)
+        self.assertGreater(out["phone"]["visible"], 0, out)
         self.assertTrue(out["dark"], out)
+        self.assertTrue(all(control["visible"] for control in out["shortBar"].values()), out)
+        self.assertTrue(all(control["visible"] for control in out["phoneBar"].values()), out)
+        self.assertEqual(out["phoneBar"], out["phoneBarAfterScroll"], out)
+        self.assertTrue(out["hasDensity"] and out["compactDefault"], out)
+        self.assertEqual(out["savedDensity"], "comfortable", out)
+        self.assertGreater(out["comfortable"]["height"], out["initial"]["height"], out)
 
     def test_purchase_scroll_and_list_density(self):
         out = run_node(self, SCRIPT, "owner", OWNER_PW, self.purchase_id, "purchase")

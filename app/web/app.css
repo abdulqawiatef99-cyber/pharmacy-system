@@ -468,17 +468,20 @@ th[data-sort]::after { content: " " attr(data-dir); }
 .spNone { padding: 6px 10px; font-size: .875rem; }
 
 /* Compact screen tables keep the selected font scale and touch targets. */
-#app { --table-small: max(13px, .8125rem); }
+#app { --table-small: max(13px, .8125rem); --table-padding: 4px; --table-button: 32px; --table-input: 32px; }
+[data-density="comfortable"] #app {
+  --table-small: max(13px, .875rem); --table-padding: 10px; --table-button: 36px; --table-input: 44px;
+}
 @media screen {
-  #app :is(th, td) { padding-block: 4px; line-height: 1.35; }
+  #app :is(th, td) { padding-block: var(--table-padding); line-height: 1.35; }
   #app th, #app table :is(.muted, .small, .badge, .chip, .raw, .iname-ar, .lno, kbd, small) {
     font-size: var(--table-small);
   }
   #app table :is(.badge, .chip) { padding-block: 1px; }
-  #app table :is(button, .btn) { min-height: 32px; }
+  #app table :is(button, .btn) { min-height: var(--table-button); }
   #app table .btn.small { padding: 3px 8px; }
   #app table :is(input:not([type=checkbox], [type=radio]), select) {
-    min-height: 32px; padding-block: 3px; font-size: max(13px, 1em);
+    min-height: var(--table-input); padding-block: 3px; font-size: max(13px, 1em);
   }
   #app table .qty.mix { margin-top: 2px; font-size: max(13px, .9em); }
 }
@@ -505,7 +508,8 @@ body:has(#dhikrBar) .invoice-workspace { --invoice-bottom: max(12px, 1.6em); }
 .pos-work { display: flex; flex-direction: column; gap: 6px; max-block-size: max(360px, var(--invoice-space)); }
 .pos-work .tabs { flex: none; max-block-size: 6rem; margin: 0; overflow: auto; }
 .pos-work .tab, #pTabs .tab { padding-block: 4px; min-height: 32px; }
-.pos-work > label { flex: none; }
+.pos-entry { flex: none; }
+.pos-entry > label + label { display: block; margin-block-start: 4px; }
 .pos-work #posQ { min-height: 44px; padding-block: 5px; }
 .pos-work #posRes { flex: none; max-block-size: 24dvh; overflow: auto; }
 .pos-work #posRes:empty, #posSafety:empty, #qaErr:empty { display: none; }
@@ -522,7 +526,12 @@ body:has(#dhikrBar) .invoice-workspace { --invoice-bottom: max(12px, 1.6em); }
 .pos-side .mt { margin-block-start: 6px; }
 .pos-side .sum { padding-block: 3px; }
 .pos-side .sum.due b { font-size: 1.8rem; }
-.pos-payment { margin-block-start: 8px; padding-block-start: 8px; border-block-start: 1px solid var(--line); }
+.pos-invoice-details { border: 0; margin: 0; padding: 0; }
+.pos-bar { flex: none; padding: 4px 10px 0; border-block-start: 1px solid var(--line); }
+.pos-bar .sum.due { border: 0; margin: 0; }
+.pos-bar .invoice-actions { border: 0; padding-inline: 0; }
+#posDone kbd { font-size: var(--table-small); white-space: nowrap; }
+#posDetailsToggle, #posTools > summary, #qkTgl span:last-child, .pos-search-compact { display: none; }
 
 .purchase-workspace { grid-template-columns: minmax(0, 1fr) minmax(240px, 280px); }
 #pTabs { margin-block-end: 8px; }
@@ -550,18 +559,93 @@ body:has(#dhikrBar) .invoice-workspace { --invoice-bottom: max(12px, 1.6em); }
 .lines td[data-label]::before { font-size: var(--table-small); }
 
 @media screen and (max-width: 760px) {
-  html:has(.invoice-workspace) { scroll-padding-block-end: calc(min(38dvh, 16rem) + 2rem); }
-  .invoice-workspace {
+  html:has(.purchase-workspace) { scroll-padding-block-end: calc(min(38dvh, 16rem) + 2rem); }
+  .purchase-workspace {
     --invoice-dock-size: min(38dvh, 16rem);
     grid-template-columns: minmax(0, 1fr); padding-block-end: var(--invoice-dock-size);
   }
-  .invoice-side {
+  .purchase-summary {
     position: fixed; inset: auto 10px var(--invoice-bottom);
     max-block-size: var(--invoice-dock-size); box-shadow: 0 -2px 8px rgb(0 0 0 / 15%);
   }
-  .pos-side { block-size: var(--invoice-dock-size); }
-  .pos-work { max-block-size: max(280px, calc(var(--invoice-space) - var(--invoice-dock-size))); }
   .purchase-workspace .invoice-lines { max-block-size: max(180px, calc(var(--invoice-space) - var(--invoice-dock-size))); }
+}
+
+/* The compact cashier fills the space between the app header and the bottom of the screen. */
+@media screen and ((max-width: 1000px) or (max-height: 650px)) {
+  body:has(.pos.invoice-workspace) { overflow: hidden; }
+  body:has(.pos.invoice-workspace) .topbar { gap: 4px; padding: 4px 8px; }
+  body:has(.pos.invoice-workspace) .topbar a { padding: 4px 6px; white-space: nowrap; }
+  body:has(.pos.invoice-workspace) #toast { inset-block: 45% auto; }
+  .pos.invoice-workspace {
+    position: relative;
+    grid-template: "tabs tabs quick tools" auto "search search customer customer" auto
+                   "lines lines lines lines" minmax(0, 1fr) "pay pay pay pay" auto / minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+    align-items: stretch; gap: 6px; block-size: var(--invoice-space);
+  }
+  .pos-main, .pos-work, .pos-side, .pos-side .invoice-side-scroll { display: contents; }
+  .pos-work .tabs { grid-area: tabs; min-width: 0; max-block-size: none; flex-wrap: nowrap; align-items: start; }
+  .pos-work .tabs .tab { flex: none; }
+  .pos-entry { grid-area: search; }
+  .pos-customer { grid-area: customer; }
+  .pos-entry, .pos-customer { position: relative; min-width: 0; }
+  .pos-entry #posQ, .pos-customer #posCust { min-height: 32px; inline-size: 100%; padding-block: 3px; }
+  .pos-entry .f, .pos-customer .f { font-size: var(--table-small); line-height: 1.3; }
+  .pos-customer .mt { margin-block-start: 3px; }
+  .pos-customer .seg2 { padding: 2px; }
+  .pos-customer .seg2 button { min-height: 32px; font-size: var(--table-small); }
+  .pos-entry .results, #posCustRes:not(:empty) {
+    position: absolute; inset-block-start: 100%; inset-inline: 0; z-index: 4;
+    background: var(--panel); max-block-size: 35dvh; overflow: auto;
+  }
+  #posCart { grid-area: lines; min-block-size: 0; }
+  #posCart .cart { display: table; max-inline-size: none; }
+  #posSafety:not(:empty), .pos-details.on {
+    grid-area: lines; position: absolute; inset: 0; z-index: 2;
+    overflow: auto; overscroll-behavior: contain; background: var(--panel);
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 8px;
+  }
+  #posSafety:not(:empty) { z-index: 3; }
+  #posSafety > .panel { margin: 0; }
+  .pos-details:not(.on) { display: none; }
+  .pos-bar {
+    grid-area: pay; position: sticky; inset-block-end: 0; display: grid; align-items: center; column-gap: 6px;
+    grid-template: "due methods tender details done" auto /
+      minmax(0, auto) minmax(0, 2fr) minmax(0, 1fr) auto auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 5px;
+  }
+  .pos-bar .sum.due { grid-area: due; gap: 4px; flex-wrap: wrap; font-size: var(--table-small); }
+  .pos-bar .sum.due b { font-size: max(16px, 1.125rem); }
+  .pos-bar .paym { grid-area: methods; gap: 3px; }
+  .pos-bar .paym button { min-height: 32px; padding-inline: 3px; font-size: var(--table-small); }
+  .pos-tender { grid-area: tender; min-width: 0; }
+  .pos-tender .f { margin: 0; font-size: var(--table-small); }
+  .pos-tender :is(input, select) { inline-size: 100%; min-height: 32px; padding-inline: 4px; font-size: max(13px, 1rem); }
+  #posDetailsToggle { display: block; grid-area: details; min-height: 32px; padding: 3px 6px; font-size: var(--table-small); }
+  .pos-bar .invoice-actions { grid-area: done; padding: 0; }
+  .pos-bar #posDone { min-height: 36px; padding: 3px 6px; font-size: max(13px, 1rem); }
+  #posQuick { grid-area: quick; justify-self: end; }
+  #posQuick .qsale { margin: 0; padding: 3px 5px; }
+  #posQuick .qsale h2 { font-size: var(--table-small); }
+  #posQuick .qsale > .row, #posQuick .qsale > .row > span { flex-wrap: nowrap; align-items: center; gap: 4px; }
+  #posQuick .qsale > .row button { min-height: 32px; padding: 2px 5px; }
+  #posTools { grid-area: tools; justify-self: end; }
+  #posTools > summary { display: block; cursor: pointer; padding: 6px; min-height: 32px; font-size: var(--table-small); color: var(--brand); }
+  .pos-tools-content, #posQuick .quick-content {
+    position: absolute; inset-inline: 0; z-index: 4; padding: 8px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: var(--radius); max-block-size: 50dvh; overflow: auto;
+  }
+  .pos-tools-content > p { margin-block-start: 4px; }
+}
+@media screen and (max-width: 700px) {
+  body:has(.pos.invoice-workspace) #backupWhen { display: none; }
+  #posQuick .qsale h2, .pos-search-label { display: none; }
+  .pos-search-compact { display: block; }
+  #posCart > p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #posQuick #qkTgl span:first-child { display: none; }
+  #posQuick #qkTgl span:last-child { display: inline; }
+  .pos-bar { grid-template: "due tender details" auto "methods methods done" auto / minmax(0, 1fr) minmax(0, 1fr) auto; row-gap: 4px; }
+  .pos-bar #posDone { white-space: normal; }
 }
 
 @media print {

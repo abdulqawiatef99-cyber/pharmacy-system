@@ -52,14 +52,14 @@ const normExpiry = (v) => {
   return m && t.length >= 3 ? `${m[1]}-${m[2]}` : t;
 };
 // ------------------------------------------------------------------ person's screen preferences
-const PREFS_DEFAULT = { theme: "light", accent: null, font: "m", lang: "ar", names: "both", help: "on", logout_confirm: "on" };
+const PREFS_DEFAULT = { theme: "light", accent: null, font: "m", lang: "ar", names: "both", help: "on", logout_confirm: "on", density: "compact" };
 const FONT_STEPS = ["s", "m", "l", "xl"];
 let PREFS = { ...PREFS_DEFAULT };
 try { PREFS = { ...PREFS_DEFAULT, ...JSON.parse(localStorage.getItem("prefs") || "{}") }; } catch { /* storage blocked */ }
 function applyPrefs(p) {
   PREFS = { ...PREFS_DEFAULT, ...(p || {}) };
   const h = document.documentElement;
-  h.dataset.theme = PREFS.theme; h.dataset.font = PREFS.font;
+  h.dataset.theme = PREFS.theme; h.dataset.font = PREFS.font; h.dataset.density = PREFS.density;
   if (PREFS.accent && PREFS.theme !== "dark") h.style.setProperty("--brand", PREFS.accent);
   else h.style.removeProperty("--brand");
   try { localStorage.setItem("prefs", JSON.stringify(PREFS)); } catch { /* storage blocked */ }
@@ -951,7 +951,9 @@ function tourPlace() {
   if (!r || !bub) return;
   const el = tourTarget(r.steps[r.i]);
   if (!el) { tourGo(1); return; }
-  const t = el.getBoundingClientRect(), W = innerWidth, H = innerHeight, gap = 12;
+  const t = el.getBoundingClientRect(), W = innerWidth, gap = 12;
+  const bar = POS_COMPACT.matches ? $(".pos-bar") : null;
+  const H = bar ? bar.getBoundingClientRect().top : innerHeight;
   Object.assign(ring.style, { top: `${t.top - 4}px`, left: `${t.left - 4}px`, width: `${t.width + 8}px`, height: `${t.height + 8}px` });
   const bw = bub.offsetWidth, bh = bub.offsetHeight;
   let left = Math.min(Math.max(8, t.left + t.width / 2 - bw / 2), Math.max(8, W - bw - 8));
@@ -5539,6 +5541,14 @@ const SEV = {
 };
 let SALE = null;
 let CHANNELS = null;
+const POS_COMPACT = matchMedia("(max-width: 1000px), (max-height: 650px)");
+POS_COMPACT.addEventListener("change", () => {
+  const tools = $("#posTools");
+  if (tools) {
+    tools.open = !POS_COMPACT.matches;
+    syncQuick();
+  }
+});
 const POS = { method: "cash", channel: null, split: false, parts: [], rcpt: {}, saving: null,
               adding: new Map(), completing: false };
 // #81: no receipt unless the cashier asks (F4) or the owner's amount rule picks one. An explicit choice wins
@@ -5573,7 +5583,7 @@ function linePrice(l) {
 }
 async function openDraft(id) {
   SALE = id ? await api(`/api/sales/${id}`) : await api("/api/sales", { method: "POST", body: {} });
-  POS.method = "cash"; POS.channel = null; POS.split = false; POS.parts = [];
+  POS.method = "cash"; POS.channel = null; POS.split = false; POS.parts = []; POS.details = false;
 }
 
 async function viewPos(afterCheckout = false) {
@@ -5598,19 +5608,27 @@ async function viewPos(afterCheckout = false) {
       فاتورة ${i + 1}${d.kind === "delivery" ? " · توصيل" : ""} · ${d.lines ? `${d.lines} صنف` : "فارغة"}
       <span class="x" data-close="${esc(d.id)}" title="أغلق هذه الفاتورة" aria-label="إغلاق">✕</span></button>`).join("")}
     <button class="tab add" id="tabNew" title="فاتورة جديدة (${esc(posKey("new_sale"))})">+ فاتورة <kbd>${esc(posKey("new_sale"))}</kbd></button></nav>
-      <label class="f">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف
+      <div class="pos-entry">
+      <label class="f"><span class="pos-search-label">امسح الباركود أو الكود المربع، أو اكتب أول حروف الصنف</span>
+        <span class="pos-search-compact">صنف أو باركود</span>
         <input id="posQ" lang="en" class="big" autocomplete="off" autofocus></label>
       <label class="small muted"><input type="checkbox" id="posAll" ${posShowAll() ? "checked" : ""}> اعرض كمان الأصناف اللي رصيدها صفر</label>
       <div id="posRes" class="results"></div>
+      </div>
       <section class="panel" id="posCart"></section>
       </div>
       <div id="posSafety"></div>
       <div id="posQuick"></div>
+      <details id="posTools" ${POS_COMPACT.matches ? "" : "open"}>
+        <summary>روابط البيع</summary>
+        <div class="pos-tools-content">
       <p class="keys"><kbd>Enter</kbd> يضيف علبة · <kbd>Shift+Enter</kbd> يضيف وحدة · <kbd>Alt+Enter</kbd> علبة + شريط مع بعض · <kbd>Enter</kbd> على البحث الفاضي: للدفع، و<kbd>Enter</kbd> تاني: إتمام البيع · ${posKeysHtml()}</p>
+          <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزينة</a> · <a href="#" id="posDeliv">التوصيلات المفتوحة</a>${lastSale() ? ` · <a href="#" id="posLast">🧾 اطبع إيصال آخر فاتورة (رقم ${esc(lastSale().no)})</a>` : ""}${ME.permissions.includes("cash.manage") ? ` · <a href="#" id="posKick">فتح الدرج (F8)</a>` : ""}</p><div id="posSum"></div>
+        </div>
+      </details>
     </section>
     <aside class="pos-side invoice-side panel" id="posSide"></aside>
-  </div>
-  <p class="muted mt">${ME.permissions.includes("sales.totals") ? `<a href="#" id="posSummary">ملخص اليوم</a> · ` : ""}<a href="#" id="posShift">الخزينة</a> · <a href="#" id="posDeliv">التوصيلات المفتوحة</a>${lastSale() ? ` · <a href="#" id="posLast">🧾 اطبع إيصال آخر فاتورة (رقم ${esc(lastSale().no)})</a>` : ""}${ME.permissions.includes("cash.manage") ? ` · <a href="#" id="posKick">فتح الدرج (F8)</a>` : ""}</p><div id="posSum"></div>`;
+  </div>`;
   sizeInvoiceLayout();
   renderCart(); renderSide();                    // renderCart draws the quick row too (syncQuick)
   document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", async (e) => {
@@ -5747,7 +5765,7 @@ const quickOpen = () => { try { return localStorage.getItem("posQuick") !== "0";
 // also remembered on this PC, as the old «إخفاء» was.
 const quickWide = () => {
   const mine = SALE && POS.quickWide?.[SALE.id];
-  return mine ?? (!(SALE?.lines.length) && quickOpen());
+  return mine ?? (!POS_COMPACT.matches && !(SALE?.lines.length) && quickOpen());
 };
 function syncQuick() {
   const box = $("#posQuick");
@@ -5761,14 +5779,14 @@ async function renderQuick() {
   if (!$("#posQuick") || box.dataset.wide !== String(open) || quickWide() !== open) return;   // a newer state draws itself
   const list = QUICK?.items || [];
   box.innerHTML = `<section class="panel qsale ${open ? "" : "shrunk"}"><div class="row between"><h2>⚡ البيع السريع</h2>
-      <span class="row">${open ? `<button class="btn small secondary" id="qkRef" title="حدّث">↻</button>` : ""}<button class="btn small secondary" id="qkTgl" aria-expanded="${open}">${open ? "صغّر ▴" : "افتح ▾"}</button></span></div>
-    ${open ? (list.length || (QUICK?.services || []).length ? `<div class="qgrid qrow">${list.map((x, i) => {
+      <span class="row">${open ? `<button class="btn small secondary" id="qkRef" title="حدّث">↻</button>` : ""}<button class="btn small secondary" id="qkTgl" aria-expanded="${open}"><span>${open ? "صغّر ▴" : "افتح ▾"}</span><span>البيع السريع</span></button></span></div>
+    ${open ? `<div class="quick-content">${(list.length || (QUICK?.services || []).length ? `<div class="qgrid qrow">${list.map((x, i) => {
       const can = x.is_service || x.stock_qty == null || x.stock_qty > 0;
       return `<button class="qbtn ${can ? "" : "out"}" data-q="${i}" ${can ? "" : "disabled"} title="${esc(x.name_en || x.name_ar)}">
         ${x.pinned ? `<span class="pin" aria-label="مثبّت">📌</span>` : ""}<b class="qn">${bidi(upperEn(x.name_en || x.name_ar))}</b><span class="qp">${money(x.public_price)} ج</span>${x.stock_qty != null && !x.is_service ? `<span class="qs muted small">${esc(fmtStock(x.stock_qty, x) || "0")}</span>` : ""}${can ? "" : `<span class="badge b-err">نفد</span>`}</button>`; }).join("")}${(QUICK?.services || []).map((x, i) => `<button class="qbtn svc" data-svc="${i}" title="${esc(x.name_ar || x.name_en)}">
         <b class="qn">🛎 ${esc(x.name_ar || x.name_en)}</b><span class="qp">${x.public_price != null ? `${money(x.public_price)} ج` : "بدون سعر"}</span></button>`).join("")}</div>
       <p class="muted small">كل ضغطة تضيف علبة واحدة (أو مرة واحدة للخدمة). ${canW() ? `ثبّت أي صنف هنا من "تعديل الصنف" أو من شاشة الأصناف.` : ""}</p>`
-      : `<p class="muted">لم تُبع أصناف بعد في آخر ${QUICK?.days || 14} يومًا.${canW() ? ` ثبّت الأصناف التي تريدها من "تعديل الصنف".` : ""}</p>`) : ""}
+      : `<p class="muted">لم تُبع أصناف بعد في آخر ${QUICK?.days || 14} يومًا.${canW() ? ` ثبّت الأصناف التي تريدها من "تعديل الصنف".` : ""}</p>`)}</div>` : ""}
     ${open && canW() && (QUICK?.suggested_services || []).length ? `<p class="muted small">🛎 خدمات مقترحة تعملها من شاشة الأصناف (علّم «خدمة» وحط السعر): ${QUICK.suggested_services.map((x) => `<span class="chip">${esc(x)}</span>`).join(" ")}</p>` : ""}</section>`;
   $("#qkTgl").addEventListener("click", () => {
     if (!SALE) return;
@@ -5897,7 +5915,9 @@ document.addEventListener("keydown", async (e) => {
   if (act === "done") return go(finish);
   if (act === "pay") return go(() => {
     if ($("#posSide")?.contains(document.activeElement)) { finish(); return; }
-    ($("#posSide select, #posSide input:not([type=hidden]), #posSide button") || $("#posDone"))?.focus();
+    const target = POS_COMPACT.matches ? $("#payGiven:not([disabled]), .pos-tender [data-ch]") :
+      $("#posSide select, #posSide input:not([type=hidden]), #posSide button");
+    (target || $("#posDone"))?.focus();
   });
   if ((act === "drawer" || k === "F8") && ME.permissions.includes("cash.manage")) return go(() => drawerDialog());
   if (act === "exchange") return go(() => { location.hash = "#/exchange"; });
@@ -6261,16 +6281,19 @@ function renderSide() {
   if (!POS.split) POS.parts = [];
   const remaining = dueNow(s) - POS.parts.reduce((a, p) => a + (p.amount || 0), 0);
   const rnd = dueNow(s) - s.total;                       // U2-14: the cash rounding of this payment
-  const restoreSide = keepInvoiceScroll("#posSide .invoice-side-scroll");
+  const restoreSide = keepInvoiceScroll(POS_COMPACT.matches ? "#posDetails" : "#posSide .invoice-side-scroll");
   $("#posSide").innerHTML = `
     <div class="invoice-side-scroll">
-    <section>
+    <section class="pos-customer">
       <div class="seg2" role="radiogroup" aria-label="نوع الفاتورة">
         <button class="${s.kind !== "delivery" ? "on" : ""}" data-kind="store">${s.kind !== "delivery" ? "✓ " : ""}في الصيدلية</button>
         <button class="${s.kind === "delivery" ? "on" : ""}" data-kind="delivery">${s.kind === "delivery" ? "✓ " : ""}توصيل للمنزل</button></div>
       <label class="f mt">العميل ${s.kind === "delivery" ? "" : "(اختياري)"}
         <input id="posCust" placeholder="الاسم أو الموبايل أو الكود" value="${s.customer ? esc(s.customer.name) : ""}" autocomplete="off"></label>
       <div id="posCustRes" class="cands"></div>
+    </section>
+    <div class="pos-details ${POS.details ? "on" : ""}" id="posDetails">
+    <section class="panel pos-invoice-details">
       ${s.customer ? `<p class="muted">رصيده ${money(s.customer.balance)} / حد الآجل ${money(s.customer.credit_limit)} <a href="#" id="custClear">إزالة العميل</a></p>
         ${s.customer.balance < 0 && s.lines.length && s.kind !== "delivery" ? `<p><button class="btn small" id="useCredit" type="button">💰 له رصيد ${money(-s.customer.balance)} ج — استخدمه في الفاتورة</button></p>` : ""}
         ${s.contract ? `<p><span class="chip">🤝 تعاقد ${esc(s.contract.name)}: محلي ${pct(s.contract.discount_local_bp)}% / مستورد ${pct(s.contract.discount_imported_bp)}%</span></p>` : ""}
@@ -6285,12 +6308,11 @@ function renderSide() {
       ${s.discount_total ? `<div class="sum ok"><span>خصم</span><b>${money(s.discount_total)}</b></div>` : ""}
       ${s.delivery_fee ? `<div class="sum"><span>رسوم التوصيل</span><b>${money(s.delivery_fee)}</b></div>` : ""}
       ${rnd ? `<div class="sum"><span>${posManual(s) != null ? "تقريب يدوي" : "تقريب النقدي"}</span><b>${rnd > 0 ? "+" : "−"}${money(Math.abs(rnd))}</b></div>` : ""}
-      <div class="sum due"><span>المطلوب</span><b>${money(dueNow(s))}</b></div>
       ${!POS.split && POS.method === "cash" && s.lines.length && manualRoundChoices(s.total, s.manual_rounding_limit).length ? `<div class="row mround"><span class="muted small">تقريب يدوي:</span>
         ${manualRoundChoices(s.total, s.manual_rounding_limit).map((d) => `<button type="button" class="btn small secondary ${posManual(s) === d ? "on" : ""}" data-mround="${d}">${money(s.total + d)} ج</button>`).join("")}
         ${posManual(s) != null ? `<button type="button" class="btn small secondary" data-mround="off">رجّع التقريب العادي</button>` : ""}</div>` : ""}
     </section>
-    <section class="pos-payment">
+    <section class="pos-advanced">
       ${POS.split ? `<h2>تقسيم الدفع</h2>${POS.parts.map((p, i) => `<div class="row part">
           <select data-pm="${i}">${METHODS.map(([m, t]) => `<option value="${m}" ${p.method === m ? "selected" : ""}>${t}</option>`).join("")}</select>
           ${["card", "transfer"].includes(p.method) ? chanOptions(p.method, p.channel_id).replace("data-ch", `data-pc="${i}"`) : ""}
@@ -6300,11 +6322,8 @@ function renderSide() {
         <button class="btn small secondary" id="partAdd">+ طريقة دفع</button>
         <p class="badge ${remaining === 0 ? "b-ok" : "b-warn"} mt">${remaining === 0 ? "✓ الدفع كامل" : `⚠ المتبقي ${money(remaining)}`}</p>
         <p><a href="#" id="splitOff">رجوع لطريقة دفع واحدة</a></p>`
-      : `<div class="paym">${METHODS.map(([m, t]) => `<button class="${POS.method === m ? "on" : ""}" data-m="${m}" ${m === "credit" && !s.customer ? "disabled title=\"اختر العميل أولًا\"" : ""}>${t}</button>`).join("")}</div>
-        ${["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "فيزا عن طريق" : "أي محفظة"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
-        ${POS.method === "transfer" ? proofInput(s) : ""}
-        ${POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'} autocomplete="off"></label>
-          <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>
+      : `${POS.method === "transfer" ? proofInput(s) : ""}
+        ${POS.method === "cash" ? `
           ${s.customer ? `<label class="f" id="keepBox" hidden><input type="checkbox" id="keepChange"> خليها رصيد للعميل (الباقي يتسجل له في حسابه)</label>` : ""}
           <div id="noChange" hidden><button class="btn small secondary" id="noChangeBtn" type="button">🪙 مفيش فكة</button>
             <span class="muted small" id="noChangeHint" hidden>آخر تقفيل مفيهوش جنيهات فكة</span><div id="noChangeRes"></div></div>` : ""}
@@ -6314,10 +6333,25 @@ function renderSide() {
         ${s.kind !== "delivery" && POS.rcpt[s.id] == null && RCFG?.auto_receipt ? `<span class="muted small">تلقائي من ${money(RCFG.auto_receipt_min)} ج</span>` : ""}</div>
     </section>
     </div>
-    <div class="invoice-actions">
-      <button class="btn big" id="posDone" ${s.lines.length || pendingPosAdds(s.id).length ? "" : "disabled"}>إتمام البيع <kbd>${esc(posKey("done"))}</kbd></button>
+    </div>
+    <div class="pos-bar">
+      <div class="sum due"><span>المطلوب</span><b>${money(dueNow(s))}</b></div>
+      <div class="paym">${METHODS.map(([m, t]) => `<button class="${!POS.split && POS.method === m ? "on" : ""}" data-m="${m}" ${POS.split ? "disabled" : m === "credit" && !s.customer ? "disabled title=\"اختر العميل أولًا\"" : ""}>${t}</button>`).join("")}</div>
+      <div class="pos-tender">
+        ${!POS.split && ["card", "transfer"].includes(POS.method) ? `<label class="f mt">${POS.method === "card" ? "فيزا عن طريق" : "أي محفظة"} ${chanOptions(POS.method, POS.channel)}</label>` : ""}
+        ${!POS.split && POS.method === "cash" ? `<label class="f mt">العميل دفع <input id="payGiven" type="number" step="0.01" min="0" class="big" placeholder="${money(dueNow(s))}" ${s.lines.length ? "" : 'disabled title="ضيف صنف الأول"'} autocomplete="off"></label>
+          <div class="sum ok" id="changeBox" hidden><span>الباقي للعميل</span><b id="changeV"></b></div>` : ""}
+      </div>
+      <button type="button" class="btn small secondary" id="posDetailsToggle" aria-controls="posDetails" aria-expanded="${!!POS.details}">تفاصيل الفاتورة</button>
+      <div class="invoice-actions">
+        <button class="btn big" id="posDone" aria-keyshortcuts="${esc(posKey("done"))}" ${s.lines.length || pendingPosAdds(s.id).length ? "" : "disabled"}>إتمام البيع <kbd>${esc(posKey("done"))}</kbd></button>
+      </div>
     </div>`;
   restoreSide();
+  $("#posDetailsToggle").addEventListener("click", (e) => {
+    POS.details = $("#posDetails").classList.toggle("on");
+    e.currentTarget.setAttribute("aria-expanded", POS.details);
+  });
   $("#posProof")?.addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
     const fd = new FormData(); fd.append("file", f);
@@ -6340,7 +6374,10 @@ function renderSide() {
     document.querySelectorAll("#posSide [data-kind]").forEach((x) => { x.disabled = true; });
     try { SALE = await api(`/api/sales/${SALE.id}`, { method: "PATCH", body: { kind: b.dataset.kind } }); await fillFromCustomer(); }
     catch (er) { toast(er.message, true); }
-    finally { POS.kindBusy = false; renderSide(); refreshTabLabel(); }
+    finally {
+      if (POS_COMPACT.matches && SALE.kind === "delivery") POS.details = true;
+      POS.kindBusy = false; renderSide(); refreshTabLabel();
+    }
   }));
   document.querySelectorAll("[data-dl]").forEach((inp) => inp.addEventListener("change", async () => {
     const k = inp.dataset.dl, v = k === "fee" ? toPiasters(inp.value) || 0 : inp.value;
@@ -8789,7 +8826,7 @@ function contrastWhite(hex) {
 function viewMe() {
   const p = PREFS, cur = (p.accent || "#0F5E54").toUpperCase();
   const radio = (name, v, label, extra = "") => `<label><input type="radio" name="${name}" value="${v}" ${p[name] === v ? "checked" : ""} ${extra}> ${label}</label>`;
-  app.innerHTML = `<section class="panel narrowpanel"><div class="row between"><h1>الشكل واللغة</h1>
+  app.innerHTML = `<section class="panel narrowpanel"><div class="row between"><h1>المظهر واللغة</h1>
       <button class="btn small secondary" id="prReset">↺ أعد كل شيء إلى الافتراضي</button></div>
     <p class="muted">هذه الإعدادات خاصة بك وحدك، وتُحفظ على حسابك. الافتراضي هو الأريح للعمل طوال اليوم.</p>
     <h2 class="mt">الألوان</h2>
@@ -8805,6 +8842,8 @@ function viewMe() {
     <h2 class="mt">حجم الخط</h2>
     <div class="seg">${radio("font", "s", "صغير")}${radio("font", "m", "عادي (الافتراضي)")}${radio("font", "l", "كبير")}${radio("font", "xl", "كبير جدًا")}</div>
     <p class="muted">اختصار: Ctrl و + أو Ctrl و −</p>
+    <h2 class="mt">كثافة الصفوف</h2>
+    <div class="seg">${radio("density", "comfortable", "مريح")}${radio("density", "compact", "مضغوط")}</div>
     <h2 class="mt">أسماء الأصناف</h2>
     <div class="seg">${radio("names", "both", "الاثنان (الافتراضي)")}${radio("names", "en", "إنجليزي فقط")}${radio("names", "ar", "عربي فقط")}</div>
     <h2 class="mt">تأكيد الخروج</h2>
