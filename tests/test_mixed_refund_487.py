@@ -137,6 +137,7 @@ class TestMixedRefund(WiringCase):
                     draft = self.line(sid, item, units=1)
                     original_balance, drawer = self.bal(account), self.drawer()
                     before = money.summary(self.db, self.ctx, self.today, self.today)
+                    before_statement = money.statement(self.db, self.ctx, account, self.today, self.today)
                     path = f"/api/sales/{sale['id']}/exchange"
                     payload = {"new_sale_id": sid, "lines": {sale["lines"][0]["id"]: 1}, "refund_method": "original",
                                "reason": "استبدال تجربة", "version": draft["version"], "request_id": sid}
@@ -151,6 +152,10 @@ class TestMixedRefund(WiringCase):
                     flow = money.summary(self.db, self.ctx, self.today, self.today)
                     self.assertEqual((flow["total_in"] - before["total_in"], flow["total_out"] - before["total_out"]),
                                      (max(0, price - 2000), max(0, 2000 - price)))
+                    statement = money.statement(self.db, self.ctx, account, self.today, self.today)
+                    self.assertEqual((statement["total_in"] - before_statement["total_in"],
+                                      statement["total_out"] - before_statement["total_out"]),
+                                     (0, max(0, 2000 - price)))
                     self.assertEqual(out["sale"]["payments"][0]["channel"], sale["payments"][0]["channel"])
                     self.assertEqual(self.split(self.refund(out["sale"]))[0], (method, min(price, 2000)))
 
@@ -297,3 +302,46 @@ class TestMixedRefund(WiringCase):
         self.assertEqual(self.split({"refund_payments": out["refund_due"]}), [("cash", 300)])
         after = money.summary(self.db, self.ctx, self.today, self.today)
         self.assertEqual((after["total_in"] - before["total_in"], after["total_out"] - before["total_out"]), (0, 300))
+
+    def test_legacy_wallet_source_without_channel_reserves_the_named_wallet(self):
+        from unittest.mock import patch
+        from app.finance import money
+        original_post = money._post
+
+        def post(db, ctx, account, amount, kind, **kwargs):
+            if kind == "sale" and kwargs.get("meta", {}).get("method") == "transfer":
+                kwargs["meta"] = {"method": "transfer"}
+            return original_post(db, ctx, account, amount, kind, **kwargs)
+
+        with patch.object(money, "_post", side_effect=post):
+            sale = self.sale(cash=0, card=2000, wallet=2000, units=2)
+        self.verify_wallet(sale)
+        self.legacy_card_refund(sale, wallet_account=self.wallet)
+        error = self.refund(sale, method="transfer", status=409)["error"]
+        self.assertEqual(error["details"]["max_transfer"], 0)
+        self.assertEqual(self.split(self.refund(sale)), [("card", 2000)])
+        self.assertEqual((self.bal(self.paymob), self.bal(self.wallet)), (0, 0))
+
+    def test_legacy_card_refund_consumes_the_card_channel_that_was_routed(self):
+        from unittest.mock import patch
+        from app.finance import money
+        from app.sales import channels
+        first_channel = next(c["id"] for c in channels.save(self.db, self.ctx, {
+            "name": "بطاقة بلا حساب", "kind": "card"}) if c["name"] == "بطاقة بلا حساب")
+        sid = self.draft()
+        self.line(sid, self.pan, units=2)
+        sale = self.complete(sid, [{"method": "card", "channel_id": c, "amount": 2000}
+                                   for c in (first_channel, self.card_ch)])
+
+        def historical_debit(db, ctx, sale_id, method, channel, amount, *, return_id, note, **kwargs):
+            money.reverse_sale(db, ctx, sale_id, amount, ref_type="sale_return", note=note,
+                               meta={"return_id": return_id, "method": "card"}, card_only=True)
+            return [(self.paymob, amount)]
+
+        with patch.object(money, "refund_tender", side_effect=historical_debit):
+            first = self.refund(sale, method="card")
+        with self.db.transaction():
+            self.db.execute("UPDATE sale_returns SET channel_id=NULL WHERE id=?", (first["return_id"],))
+        final = self.refund(sale)
+        self.assertEqual([(p["channel_id"], p["amount"]) for p in final["refund_payments"]], [(first_channel, 2000)])
+        self.assertEqual(self.bal(self.paymob), 0)

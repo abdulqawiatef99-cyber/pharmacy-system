@@ -786,9 +786,8 @@ def carry_sale_payment(db, ctx, method, channel_id, amount, account_id, sale_id,
               check=False, active=False, meta={"method": method, "channel_id": channel_id, "exchange_offset": True})
 
 
-def refund_tender(db, ctx, sale_id, method, channel_id, amount, *, return_id, note, deferred=False):
-    """Allocate to original accounts, replaying old refunds without a channel in payment order."""
-    org = ctx.org_id
+def _tender_account_history(db, org, sale_id, method):
+    """Original account balances by channel, including the allocation of channel-less refunds."""
     sources = db.all(
         "SELECT account_id, amount, meta FROM money_movements WHERE org_id=? AND ref_id=?"
         " AND kind='sale' AND ref_type='sale' AND json_extract(meta, '$.method')=? ORDER BY rowid",
@@ -809,6 +808,7 @@ def refund_tender(db, ctx, sale_id, method, channel_id, amount, *, return_id, no
     other_accounts = {r["account_id"] for r in db.all(
         "SELECT DISTINCT account_id FROM money_movements WHERE org_id=? AND ref_id=? AND kind='sale'"
         " AND ref_type='sale' AND json_extract(meta,'$.method')<>?", (org, sale_id, method))}
+    legacy_debits = {}
     for row in db.all(
         "SELECT account_id, amount, meta FROM money_movements WHERE org_id=? AND ref_id=?"
         " AND kind='refund' AND ref_type='sale_return' ORDER BY rowid", (org, sale_id)):
@@ -826,7 +826,19 @@ def refund_tender(db, ctx, sale_id, method, channel_id, amount, *, return_id, no
             take = min(left, remaining)
             balances[key] -= take
             left -= take
+            if take and "channel_id" not in meta:
+                legacy_debits[key[0]] = legacy_debits.get(key[0], 0) + take
+    return balances, bool(sources), legacy_debits
 
+
+def legacy_card_channel_debits(db, org, sale_id):
+    return _tender_account_history(db, org, sale_id, "card")[2]
+
+
+def refund_tender(db, ctx, sale_id, method, channel_id, amount, *, return_id, note, deferred=False):
+    """Allocate a refund to the original accounts of the chosen channel."""
+    org = ctx.org_id
+    balances, has_sources, _ = _tender_account_history(db, org, sale_id, method)
     posted = []
     left = amount
     for (channel, account), balance in balances.items():
@@ -839,7 +851,7 @@ def refund_tender(db, ctx, sale_id, method, channel_id, amount, *, return_id, no
     if left:
         # An unrouted payment is still recorded in sale_returns, with its original channel.
         account = None
-        if method == "card" and not sources:
+        if method == "card" and not has_sources:
             account = (route_for(db, org, method, channel_id) if channel_id
                        else _card_refund_account(db, ctx, sale_id))
         posted.append((account, left))
@@ -870,12 +882,16 @@ def legacy_wallet_refund_reserve(db: Database, ctx: Context, sale_id: str) -> tu
                        " WHERE org_id=? AND ref_id=? AND ref_type IN ('sale','sale_return')",
                        (ctx.org_id, sale_id))
     cards, wallets = set(), {}
+    original_wallets = [p["channel_id"] for p in db.all(
+        "SELECT DISTINCT channel_id FROM sale_payments WHERE org_id=? AND sale_id=? AND method='transfer'",
+        (ctx.org_id, sale_id))]
     for row in movements:
         meta = json.loads(row["meta"] or "{}")
         if row["kind"] == "sale" and meta.get("method") == "card":
             cards.add(row["account_id"])
         elif row["kind"] == "sale" and meta.get("method") == "transfer":
-            wallets.setdefault(row["account_id"], set()).add(meta.get("channel_id"))
+            channels = [meta["channel_id"]] if "channel_id" in meta else original_wallets
+            wallets.setdefault(row["account_id"], set()).update(channels or [None])
     by_id = {r["id"]: r["total"] for r in legacy}
     by_channel, uncertain, wallet_paid = {}, 0, 0
     for row in movements:
@@ -1009,13 +1025,18 @@ def statement(db: Database, ctx: Context, account: str, date_from: str | None = 
                     " ORDER BY m.created_at, m.rowid", (ctx.org_id, aid, lo, hi)):
         run += r["amount"]
         d = dict(r)
-        d.update(day=_local_date(d["created_at"]).isoformat(), kind_label=KINDS[d["kind"]], balance=run,
-                 meta=json.loads(d["meta"]) if d["meta"] else None)
+        meta = json.loads(d["meta"]) if d["meta"] else None
+        external = _external_amount(d["amount"], meta or {})
+        label = KINDS[d["kind"]]
+        if external != d["amount"]:
+            label = f"{label} · تسوية استبدال" if external else "تسوية استبدال"
+        d.update(day=_local_date(d["created_at"]).isoformat(), kind_label=label, balance=run,
+                 meta=meta, external_amount=external)
         lines.append(d)
     return {"account": {k: a[k] for k in ("id", "name", "kind", "is_active", "allow_negative")},
             "from": d1.isoformat(), "to": d2.isoformat(), "opening": opening, "closing": run, "lines": lines,
-            "total_in": sum(x["amount"] for x in lines if x["amount"] > 0),
-            "total_out": -sum(x["amount"] for x in lines if x["amount"] < 0)}
+            "total_in": sum(max(0, x["external_amount"]) for x in lines),
+            "total_out": sum(max(0, -x["external_amount"]) for x in lines)}
 
 
 def _external_amount(amount, meta):

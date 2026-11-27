@@ -44,12 +44,21 @@ def original_capacity(db, ctx, sale, rounding_left):
     wallets = [key for key in caps if key[0] == "transfer"]
     wallet_history, unknown_history, paid_by_wallet = (
         money.legacy_wallet_refund_reserve(db, ctx, sid) if wallets else ({}, 0, 0))
-    # Channel-less card refunds consume card capacity in payment order, except money proved to
-    # have come from a distinct original wallet account.
-    card_unknown = (max(0, used.get(("card", None), 0) - paid_by_wallet)
-                    if ("card", None) not in received else 0)
+    # Prefer the channel proved by historical account debits. An unrouted card would have been
+    # skipped by the old reversal, even when it was first in the original list of payments.
+    used_without_channel = used.get(("card", None), 0)
+    tracked = money.legacy_card_channel_debits(db, org, sid) if used_without_channel else {}
+    unknown = max(0, used_without_channel - paid_by_wallet)
+    for channel, debited in tracked.items():
+        key = ("card", channel)
+        if channel is not None and key in caps:
+            attributed = min(unknown, debited)
+            caps[key] = max(0, caps[key] - attributed)
+            unknown -= attributed
     if ("card", None) in received:
-        caps["card", None] += min(paid_by_wallet, used.get(("card", None), 0))
+        caps["card", None] = max(0, received["card", None] - unknown)
+        unknown = 0
+    card_unknown = unknown
     cash_other = max(0, used.get(("cash", None), 0) - received["cash", None])
     for key in caps:
         if key[0] == "card":
@@ -115,9 +124,11 @@ def allocate(db, ctx, sale, amount, rounding, rounding_left, *, only=None):
 def payments(db, org, return_id):
     """The rows of a receipt, including those of a historical single-tender return."""
     return [dict(r) for r in db.all(
-        "SELECT r.id, r.refund_method method, r.total amount, r.channel_id, c.name channel"
-        " FROM sale_returns r LEFT JOIN payment_channels c ON c.id=r.channel_id AND c.org_id=r.org_id"
-        " WHERE r.org_id=? AND (r.id=? OR r.part_of=?) ORDER BY r.rowid", (org, return_id, return_id))]
+        "SELECT r.id, r.refund_method method, r.total amount, r.channel_id, c.name channel FROM ("
+        " SELECT rowid position, * FROM sale_returns WHERE id=? AND org_id=?"
+        " UNION ALL SELECT rowid position, * FROM sale_returns WHERE part_of=? AND org_id=?) r"
+        " LEFT JOIN payment_channels c ON c.id=r.channel_id AND c.org_id=r.org_id"
+        " ORDER BY r.position", (return_id, org, return_id, org))]
 
 
 def exchange_parts(parts, replacement_total):

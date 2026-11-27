@@ -6639,14 +6639,19 @@ function wireHunt() {
     if (sm) {
       try {
         const r = await api(`/api/cash/shifts/${sm.dataset.id}/owner-summary`);
-        // UX-28: each void and cash refund of the shift on its own row, with a link to the invoice
-        const ev = [...r.voids.map((x) => ({ ...x, kind: "إلغاء" })), ...r.cash_refunds.map((x) => ({ ...x, kind: "مرتجع نقدي" }))];
+        const ev = [
+          ...r.voids.map((x) => ({ ...x, kind: "إلغاء" })),
+          ...r.cash_refunds.map((x) => ({ ...x, kind: "مرتجع نقدي" })),
+          ...(r.refund_payments || []).filter((x) => x.method !== "cash").map((x) => ({
+            ...x, at: x.created_at, kind: REFUND_METHOD_LABELS[x.method] + (x.channel ? ` · ${x.channel}` : ""),
+          })),
+        ];
         $("#shHuntOut").innerHTML = `<section class="panel"><h3>ملخص للمالك</h3><textarea id="shSumT" rows="${Math.min(24, 10 + ev.length)}" readonly>${esc(r.text)}</textarea>
           <div class="row"><button class="btn" id="shSumCopy">انسخ</button><span class="muted">البرنامج مبيبعتش حاجة: انسخه وابعته بنفسك.</span></div>
-          <h4>الإلغاء والمرتجع النقدي في الشيفت</h4>${ev.length ? `<div class="tablewrap"><table id="shSumEv"><thead><tr><th>النوع</th><th>الفاتورة</th><th>المبلغ</th><th>الوقت</th><th>مين</th><th>باعها</th><th>السبب</th></tr></thead><tbody>
-          ${ev.map((x) => `<tr><td><span class="badge ${x.kind === "إلغاء" ? "b-err" : "b-warn"}">${x.kind}</span></td><td>${x.sale_id ? `<a href="#/sales/${esc(x.sale_id)}">${esc(x.sale_no)}</a>` : esc(x.sale_no)}</td>
+          <h4>الإلغاء والمرتجعات في الشيفت</h4>${ev.length ? `<div class="tablewrap"><table id="shSumEv"><thead><tr><th>النوع</th><th>الفاتورة</th><th>المبلغ</th><th>الوقت</th><th>مين</th><th>باعها</th><th>السبب</th></tr></thead><tbody>
+          ${ev.map((x) => `<tr><td><span class="badge ${x.kind === "إلغاء" ? "b-err" : "b-warn"}">${esc(x.kind)}</span></td><td>${x.sale_id ? `<a href="#/sales/${esc(x.sale_id)}">${esc(x.sale_no)}</a>` : esc(x.sale_no)}</td>
             <td class="num">${money(x.amount)}</td><td>${esc(stamp(x.at))}</td><td>${esc(x.by || "")}</td><td>${esc(x.sold_by || "")}</td><td>${esc(x.reason || "")}</td></tr>`).join("")}</tbody></table></div>`
-          : `<p class="muted">مفيش إلغاء ولا مرتجع نقدي في الشيفت ده</p>`}
+          : `<p class="muted">مفيش إلغاء ولا مرتجعات في الشيفت ده</p>`}
           <p><b>إجمالي اليوم ${esc(r.day_date)} (كل الشيفتات):</b> إلغاء ${r.day.voids} فاتورة بـ ${money(r.day.voids_total)} ج · مرتجع نقدي ${r.day.cash_refunds} بـ ${money(r.day.cash_refunds_total)} ج</p></section>`;
         $("#shSumCopy").addEventListener("click", async () => {
           try { await navigator.clipboard.writeText(r.text); toast("اتنسخ"); } catch { $("#shSumT").select(); document.execCommand("copy"); toast("اتنسخ"); }

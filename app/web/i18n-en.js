@@ -1,6 +1,9 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"تسوية استبدال": "Exchange offset",
+"الإلغاء والمرتجعات في الشيفت": "Voids and refunds in the shift",
+"مفيش إلغاء ولا مرتجعات في الشيفت ده": "No voids or refunds in this shift",
 "المبلغ المتاح للرد على حساب العميل": "Amount available to return to the customer account",
 "تفاصيل مبالغ المرتجعات": "Refund payment details",
 "توزيع مبلغ المرتجع اتغير؛ راجع الأرقام": "The refund allocation changed. Review the amounts.",

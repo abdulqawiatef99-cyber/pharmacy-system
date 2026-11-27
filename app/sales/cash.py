@@ -106,9 +106,11 @@ def _return_rows(db: Database, s) -> list[dict]:
         " SELECT r.* FROM sale_returns r JOIN sales x ON x.id=r.sale_id AND x.org_id=r.org_id"
         " WHERE r.org_id=? AND x.branch_id=? AND r.created_at>=? AND (? IS NULL OR r.created_at<=?)"
         " AND (r.shift_id=? OR r.shift_id IS NULL) AND (r.refund_method<>'cash' OR r.total=0))"
-        " SELECT r.id, coalesce(r.part_of,r.id) return_id, x.sale_no, r.created_at, r.refund_method method,"
-        " r.total amount, r.rounding, r.channel_id, coalesce(c.name,'') channel FROM in_shift r"
+        " SELECT r.id, coalesce(r.part_of,r.id) return_id, r.sale_id, x.sale_no, r.created_at,"
+        " r.refund_method method, r.total amount, r.rounding, r.channel_id, coalesce(c.name,'') channel,"
+        " r.reason, u.full_name by, sold.full_name sold_by FROM in_shift r"
         " JOIN sales x ON x.id=r.sale_id AND x.org_id=r.org_id"
+        " LEFT JOIN users u ON u.id=r.created_by LEFT JOIN users sold ON sold.id=x.created_by"
         " LEFT JOIN payment_channels c ON c.id=r.channel_id AND c.org_id=r.org_id"
         " ORDER BY r.created_at,r.id", (s["id"], s["org_id"], s["org_id"], s["branch_id"], s["opened_at"],
                                        s["closed_at"], s["closed_at"], s["id"]))]
