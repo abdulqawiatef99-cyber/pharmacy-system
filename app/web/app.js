@@ -587,6 +587,7 @@ const routes = [
   [/^#\/deadstock$/, viewDeadstock],
   [/^#\/sales$/, async () => { await viewSales(); estockPanel("list", "sale"); }],
   [/^#\/system$/, viewSystem],
+  [/^#\/registers$/, viewRegisters],
   [/^#\/sales\/([\w-]+)$/, viewSale],
   [/^#\/pos$/, viewPos],
   [/^#\/counts\/([\w-]+)$/, viewCountSession],
@@ -737,6 +738,7 @@ const HELP = {
   procurement: ["الطلبية: الأصناف المنتظمة اللي هتخلص، والكشكول وطلبات العملاء، مقسمة على الموردين بأعلى خصم حقيقي.", ["اختار المدة: أسبوع (الافتراضي) أو أسبوعين أو شهر؛ الأعمدة التلاتة ظاهرة جنب بعض.", "التنبيهات (غالي، ثلاجة، خصم أقل، مطابقة مش مؤكدة) محتاجة موافقتك قبل الطلب.", "بعد ما تبعت الطلبية بنفسك اضغط «اتبعتت: تابعها»، وبعدين علّم كل صنف: وصل، وصل جزء، أو مش موجود عنده.", "لا يطلب البرنامج ولا يبعت شيئًا من تلقاء نفسه."]],
   deadstock: ["الرواكد: من تقارير البرنامج القديم.", []],
   system: ["البرنامج: التحديث، والنسخ الاحتياطي، وشكل الإيصال، وأجهزة البطاقات.", []],
+  registers: ["هذا الجهاز: اعرف الدرج اللي المتصفح مربوط بيه.", ["المالك أو المدير يقدر يربط درج ويضبط طابعاته من هنا."]],
   users: ["المستخدمون: الأدوار والصلاحيات وحدود الخصم.", []],
   notifications: ["الإشعارات: كل ما حدث ويحتاج إلى علمك.", []],
   me: ["المظهر واللغة ورقمي السري: إعدادات خاصة بك وحدك.", []],
@@ -2593,6 +2595,7 @@ let LABEL_CFG = null;
 const labelSize = (f) => (f.label_preset.value === "custom" ? `${+f.label_w.value}x${+f.label_h.value}` : f.label_preset.value);
 const labelFields = (f) => Object.fromEntries([...f.querySelectorAll("[data-lf]")].map((x) => [x.dataset.lf, x.checked]));
 async function printLabels(list) {
+<<<<<<< HEAD
   const url = `/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`;
   // QA-29: the page is asked first (check=1 prints and records nothing), so a refusal is said, not lost in the frame
   const page = async () => {
@@ -2601,10 +2604,15 @@ async function printLabels(list) {
   };
   try { LABEL_CFG ||= await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
   if (LABEL_CFG.label_lang === "browser" || LABEL_CFG.label_lang === "a4") return page();
+=======
+  const page = () => printInFrame(`/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`);
+  try { LABEL_CFG = await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
+  const mode = LABEL_CFG.device_label_lang || LABEL_CFG.label_lang;
+  if (mode === "browser" || mode === "a4") return page();
+>>>>>>> origin/develop
   try { const r = await api("/api/print/labels", { method: "POST", body: { items: list.map(([id, n]) => ({ id, count: n })) } }); toast(`✓ أُرسل ${r.labels} ملصق إلى الطابعة`); }
   catch (er) {
-    // the owner switched labels to the browser after this tab read the setting: print there, read it again next time (#324 R16)
-    if (er.code === "labels_in_browser") { LABEL_CFG = null; return page(); }
+    if (er.code === "labels_in_browser") return page();
     toast(er.message, true); if (er.code === "print_failed") page();
   }
 }
@@ -3792,10 +3800,74 @@ async function viewEstockMove() {
   await refresh();
 }
 
+async function viewRegisters() {
+  const cfg = await api("/api/settings/registers");
+  const settings = "/api/settings/registers";
+  const current = cfg.current;
+  const printerList = (ME.permissions.includes("settings.manage")
+    ? (await api("/api/print/printers").catch(() => ({ printers: [] }))).printers : []);
+  const registerFields = (r = {}) => `
+    <label class="f">اسم الدرج <input name="name" value="${esc(r.name)}" maxlength="80" required></label>
+    <label class="f">طابعة الإيصال والدرج <input name="receipt_printer" dir="ltr" list="registerPrinters" value="${esc(r.receipt_printer)}" placeholder="طابعة البرنامج"></label>
+    <label class="f">طابعة الملصقات <input name="label_printer" dir="ltr" list="registerPrinters" value="${esc(r.label_printer)}" placeholder="طابعة البرنامج"></label>
+    <label class="f">فتح الدرج من الطابعة <select name="drawer_kick">
+      ${r.id === 1 ? `<option value="" ${r.drawer_kick == null ? "selected" : ""}>إعداد البرنامج</option>` : ""}
+      <option value="off" ${r.drawer_kick === 0 || !r.id ? "selected" : ""}>متوقف</option>
+      <option value="on" ${r.drawer_kick === 1 ? "selected" : ""}>شغّال</option></select></label>
+    ${r.id ? `<label class="chk"><input name="active" type="checkbox" ${r.active ? "checked" : ""}> درج نشط</label>` : ""}`;
+  app.innerHTML = `<section class="panel narrowpanel"><div class="row between"><h1>هذا الجهاز</h1><a href="#/shift">الشيفت</a></div>
+    ${current ? `<p>الدرج المرتبط: <b>${esc(current.name)}</b></p>` : `<p class="badge b-warn">الجهاز ده مش مربوط بدرج. المالك أو المدير يدخل على الجهاز ده بكلمة السر (مش الرقم السري)، ويفتح «هذا الجهاز» من شاشة الشيفت، ويختار الدرج ويضغط «اربط هذا الجهاز».</p>`}
+    ${cfg.can_manage ? `<form id="registerBind" class="row"><label class="f">درج هذا الجهاز <select name="register_id">
+      ${cfg.registers.filter((r) => r.active).map((r) => `<option value="${r.id}" ${r.id === current?.id ? "selected" : ""}>${esc(r.name)}</option>`).join("")}
+      </select></label><button class="btn" ${cfg.registers.some((r) => r.active) ? "" : "disabled"}>اربط هذا الجهاز</button></form>
+      <p class="muted">اعمل الربط من المتصفح اللي هتبيع منه. لو ربطت نفس الدرج هنا، المتصفح اللي كان مربوط بيه هيفقد الربط.</p>`
+      : `<p class="muted">المالك أو المدير يقدر يربط الدرج من المتصفح ده.</p>`}</section>
+    ${cfg.can_manage ? `<section class="panel"><h2>أدراج الكاشير</h2>
+      <datalist id="registerPrinters">${printerList.map((n) => `<option value="win:${esc(n)}"></option>`).join("")}</datalist>
+      <p class="muted">لو سيبت الطابعة فاضية هتستخدم طابعة البرنامج. للطابعة المشتركة اكتب اسمها زي ما هو متسجل على ويندوز في الجهاز الرئيسي.</p>
+      <p class="muted">فتح الدرج الفرعي من الطابعة يحتاج طابعة مخصصة له.</p>
+      ${cfg.registers.map((r) => `<details class="mt"><summary>${esc(r.name)}${r.active ? "" : " — متوقف"}</summary>
+        <form class="row" data-register="${r.id}">${registerFields(r)}<button class="btn secondary">احفظ</button></form></details>`).join("")}
+      <details class="mt"><summary>أضف درج جديد</summary><form class="row" data-register="">${registerFields()}<button class="btn">أضف</button></form></details></section>
+      <section class="panel"><h2>تشغيل جهاز فرعي</h2><ol>
+        <li>وصّل الجهازين بنفس الشبكة. من الجهاز الرئيسي فعّل الشبكة من <a href="#/system">البرنامج والنسخ الاحتياطي</a>.</li>
+        <li>على الجهاز الفرعي افتح المتصفح واكتب عنوان الجهاز الرئيسي:
+          ${cfg.lan_urls.length ? `<ul>${cfg.lan_urls.map((url) => `<li><code dir="ltr">${esc(url)}</code></li>`).join("")}</ul>` : `<p>عنوان الشبكة مش ظاهر. راجع اتصال الجهاز الرئيسي.</p>`}</li>
+        <li>لو هتستخدم اسم الجهاز، ضيفه في إعداد العناوين المسموح بها <code dir="ltr">PHARM_ALLOWED_HOSTS</code> على الجهاز الرئيسي وأعد تشغيل البرنامج.
+          <p>العناوين المسموح بها: ${cfg.allowed_hosts.length ? `<bdi>${esc(cfg.allowed_hosts.join(", "))}</bdi>` : "مفيش أسماء مضافة"}</p></li>
+        <li>سجّل دخول المالك أو المدير من الجهاز الفرعي، افتح «هذا الجهاز» واربطه بدرجه، وبعدها افتح شيفت الدرج ده.</li>
+      </ol></section>` : ""}`;
+  $("#registerBind")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    await withBusy(f.querySelector("button"), async () => {
+      try {
+        await api(settings + "/bind", { method: "POST", body: { register_id: +f.register_id.value } });
+        toast("تم ربط الجهاز");
+        await viewRegisters();
+      } catch (err) { toast(err.message, true); }
+    });
+  });
+  document.querySelectorAll("[data-register]").forEach((form) => form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const rid = form.dataset.register;
+    const body = { name: form.elements.name.value, receipt_printer: form.receipt_printer.value,
+      label_printer: form.label_printer.value, drawer_kick: form.drawer_kick.value ? form.drawer_kick.value === "on" : null };
+    if (rid) body.active = form.active.checked;
+    await withBusy(form.querySelector("button"), async () => {
+      try {
+        await api(rid ? settings + "/" + rid : settings, { method: rid ? "PATCH" : "POST", body });
+        toast("تم الحفظ");
+        await viewRegisters();
+      } catch (err) { toast(err.message, true); }
+    });
+  }));
+}
+
 async function viewSystem() {
   if (!ME.permissions.includes("settings.manage")) { app.innerHTML = `<section class="panel"><p>هذه الصفحة للمالك فقط.</p></section>`; return; }
   app.innerHTML = `<section class="panel"><h1>النسخ الاحتياطي</h1><div id="bkBox"><p class="muted">…</p></div></section>
-    <section class="panel"><h1>الهاتف المحمول على شبكة الصيدلية</h1><div id="lanBox"></div></section>
+    <section class="panel"><h1>الهاتف المحمول على شبكة الصيدلية</h1><div id="lanBox"></div><p><a href="#/registers">هذا الجهاز — تشغيل جهاز فرعي</a></p></section>
     <section class="panel"><h1>شكل الفاتورة المطبوعة والملصقات</h1><div id="rcBox"></div></section>
     <section class="panel" id="dvPanel"><h1>رجّع إعدادات الأجهزة والطباعة من نسخة قديمة</h1><div id="dvBox"><p class="muted">…</p></div></section>
     <section class="panel"><h1>مساحة البيانات ومدة الاحتفاظ بها</h1><div id="stoBox"><p class="muted">جارٍ الحساب…</p></div></section>
@@ -4018,7 +4090,6 @@ async function renderReceiptCfg(c) {
       <img id="rcPreview" hidden alt="معاينة الإيصال ببيانات تجريبية">
     </fieldset>
     <div class="row"><button class="btn">احفظ</button><a href="#" id="rcTry">اطبع آخر فاتورة كتجربة</a></div></form>`;
-  LABEL_CFG = c;
   RC_LOGO = undefined;
   $("#rcLogoFile").addEventListener("change", async (e) => {
     const file = e.target.files[0]; if (!file) return;
@@ -5108,7 +5179,7 @@ async function viewDayReview() {
         ${r.purchases.by_supplier.map((x) => row(`— ${esc(x.supplier || "")} (${x.n})`, x.total)).join("")}
         ${row(`مرتجع للموردين (${r.supplier_returns.n})`, r.supplier_returns.total)}
         ${row("المتوقع في الخزينة", r.drawer.expected)}${row("المعدود", r.drawer.counted)}</tbody></table></div>
-      ${r.drawer.shifts.map((x) => `<p class="muted small">شيفت اتقفل ${esc(stamp(x.closed_at))} — ${esc(x.closed_by || "")}: متوقع ${money(x.expected_cash)}، معدود ${money(x.counted_cash)}، فرق ${money(x.difference)}</p>`).join("")}`;
+      ${r.drawer.shifts.map((x) => `<p class="muted small">${esc(x.register_name)} — شيفت اتقفل ${esc(stamp(x.closed_at))} — ${esc(x.closed_by || "")}: متوقع ${money(x.expected_cash)}، معدود ${money(x.counted_cash)}، فرق ${money(x.difference)}</p>`).join("")}`;
   };
   $("#drDay").addEventListener("change", () => load().catch((er) => toast(er.message, true)));
   load().catch((er) => { $("#drOut").textContent = er.message; });
@@ -6657,18 +6728,35 @@ function wireHunt() {
 }
 
 async function viewShift(opts = {}) {
-  let sh = null;
-  try { sh = await api("/api/cash/current"); } catch { /* none open */ }
+  let sh = null, unbound = "";
+  try { sh = await api(opts.shift ? `/api/cash/shifts/${encodeURIComponent(opts.shift)}` : "/api/cash/current"); }
+  catch (err) {
+    if (err.code === "device_unbound") unbound = err.message;
+    else if (err.code !== "not_found") throw err;
+  }
   const seeAll = ME.permissions.includes("cash.see_expected"), keeps = ME.permissions.includes("cash.manage");
-  const recent = seeAll ? (await api("/api/cash/shifts")).shifts : [];
-  const accs = await moneyAccounts(true), lastFloat = opts.float ?? (accs.find((a) => a.id === "drawer") || {}).balance;
-  const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الشيفتات</h2>${reportTools("shifts")}</div><table><thead><tr><th>من</th><th>إلى</th><th>أغلقها</th><th>المتوقع</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
-    ${recent.map((r) => `<tr><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
+  const management = ["owner", "manager"].includes(ME.role);
+  const shiftList = seeAll && (!unbound || management) ? await api("/api/cash/shifts") : { shifts: [] };
+  const recent = shiftList.shifts;
+  const accs = await moneyAccounts(true), drawer = accs.find((a) => a.id === "drawer");
+  const lastFloat = opts.float ?? drawer?.balance;
+  const deviceLink = `<a href="#/registers">هذا الجهاز</a>`;
+  const totals = shiftList.drawer_totals?.registers?.length > 1
+    ? `<div class="totals"><div>إجمالي الأدراج<b>${money(shiftList.drawer_totals.balance)} ج</b></div>
+      ${shiftList.drawer_totals.registers.map((r) => `<div>${esc(r.register_name)}<b>${money(r.balance)} ج</b></div>`).join("")}</div>` : "";
+  const hist = recent.length ? `<section class="panel" id="shHist"><div class="row between"><h2>آخر الشيفتات</h2>${reportTools("shifts")}</div>${totals}<table><thead><tr><th>الدرج</th><th>من</th><th>إلى</th><th>أغلقها</th><th>المتوقع</th><th>المعدود</th><th>النتيجة</th><th></th></tr></thead><tbody>
+    ${recent.map((r) => `<tr><td>${esc(r.register_name)}</td><td>${esc(stamp(r.opened_at))}</td><td>${r.closed_at ? esc(stamp(r.closed_at)) : `<span class="badge b-info">مفتوح</span>`}</td>
       <td>${esc(r.closed_by_name || "")}</td><td class="num">${r.status === "closed" ? money(r.expected_cash) : ""}</td><td class="num">${r.status === "closed" ? money(r.counted_cash) : ""}</td>
       <td>${r.status !== "closed" ? "" : !r.difference ? `<span class="badge b-ok">✓ مطابق</span>` : r.difference < 0 ? `<span class="badge b-err">✕ عجز ${money(-r.difference)}</span>` : `<span class="badge b-warn">⚠ زيادة ${money(r.difference)}</span>`}</td>
-      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>${r.difference ? ` <button type="button" class="btn small secondary shHunt" data-id="${esc(r.id)}">دوّر على الفرق</button>` : ""} <button type="button" class="btn small secondary shSum" data-id="${esc(r.id)}">ملخص للمالك</button>` : ""}</td></tr>`).join("")}</tbody></table><div id="shHuntOut"></div></section>` : "";
+      <td>${r.status === "closed" ? `<a href="/shift-report/${esc(r.id)}" target="_blank">التقرير</a>${r.difference ? ` <button type="button" class="btn small secondary shHunt" data-id="${esc(r.id)}">دوّر على الفرق</button>` : ""} <button type="button" class="btn small secondary shSum" data-id="${esc(r.id)}">ملخص للمالك</button>` : management && !unbound && r.id !== sh?.id ? `<button type="button" class="btn small secondary" data-count-shift="${esc(r.id)}">عدّ الدرج</button>` : ""}</td></tr>`).join("")}</tbody></table><div id="shHuntOut"></div></section>` : "";
+  if (unbound) {
+    app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1><p class="badge b-warn">${esc(unbound)}</p><p>${deviceLink}</p></section>${hist}`;
+    wireHist();
+    wireHunt();
+    return;
+  }
   if (!sh) {
-    app.innerHTML = `<section class="panel narrowpanel"><h1>الشيفت</h1>${seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : ""}<p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
+    app.innerHTML = `<section class="panel narrowpanel"><div class="row between"><h1>الشيفت</h1>${deviceLink}</div>${drawer?.register_name ? `<p>${esc(drawer.register_name)}</p>` : ""}${seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : ""}<p class="badge b-warn">⚠ لا يوجد شيفت مفتوح — البيع النقدي متوقف</p>
       <form id="shOpen" class="row mt"><label class="f">النقدية في الخزينة الآن (ج) <input name="v" type="number" step="0.25" min="0" value="${lastFloat != null ? money(lastFloat) : "0"}" class="big"></label>
       <button class="btn">افتح الشيفت</button></form></section>${hist}`;
     wireHist();
@@ -6682,19 +6770,19 @@ async function viewShift(opts = {}) {
   }
   const k = sh.cash_by_kind || {};
   const moneyLink = seeAll ? `<p class="noprint"><a href="#/money">الخزنة والحسابات ←</a></p>` : "";
-  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشيفت المفتوح</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span></div>${moneyLink}
+  app.innerHTML = `<section class="panel"><div class="row between"><h1>الشيفت المفتوح — ${esc(sh.register_name)}</h1><span class="muted">من ${esc(stamp(sh.opened_at))}</span>${deviceLink}</div>${moneyLink}
     ${sh.blind ? `<p class="badge b-info">ℹ عُدّ النقدية في الخزينة فئةً فئة واكتب العدد. تظهر النتيجة بعد الإغلاق.</p>`
     : `<div class="totals"><div>البداية<b>${money(sh.opening_cash)}</b></div><div>مبيعات نقدي<b>${money(k.sale || 0)}</b></div>
       <div>مرتجع وإلغاء<b>${money((k.refund || 0) + (k.void || 0))}</b></div><div>تحصيل آجل<b>${money(k.customer_payment || 0)}</b></div>
       <div>مصروفات<b>${money(k.payout || 0)}</b></div>${sh.rounding_total ? `<div>منها تقريب النقدي<b>${money(sh.rounding_total)}</b></div>` : ""}<div>المتوقع في الخزينة<b>${money(sh.expected_cash)}</b></div>
       ${(sh.by_channel || []).map((c) => `<div>${c.method === "card" ? "بطاقة" : "تحويل"} — ${esc(c.channel)}
         <b>${money(c.amount - (c.refunded || 0))}</b>${c.refunded ? `<span>مبيعات ${money(c.amount)} · مرتجع ${money(c.refunded)}</span>` : ""}</div>`).join("")}
-      ${sh.with_courier ? `<div>مع مندوب التوصيل<b>${money(sh.with_courier)}</b><span class="badge b-warn">⚠ لم تُسلَّم بعد</span></div>` : ""}</div>`}
-    ${ME.permissions.includes("cash.manage") ? `<form id="shPay" class="row mt"><label class="f">مصروف من الخزينة (ج) <input name="a" type="number" step="0.25" min="0"></label>
+      ${sh.with_courier ? `<div>مع مندوب التوصيل لكل الأدراج<b>${money(sh.with_courier)}</b><span class="badge b-warn">⚠ لم تُسلَّم بعد</span></div>` : ""}</div>`}
+    ${keeps && !opts.shift ? `<form id="shPay" class="row mt"><label class="f">مصروف من الخزينة (ج) <input name="a" type="number" step="0.25" min="0"></label>
       <label class="f grow">السبب <input name="n"></label><button class="btn secondary small">سجّل</button></form>` : ""}
   </section>
   ${ME.permissions.includes("cash.close") ? `<section class="panel" id="shHealth"><h2>صحة اليوم والجهاز</h2><p class="muted">بيتحسب…</p></section>` : ""}
-  ${ME.permissions.includes("cash.close") ? `<form class="panel" id="shClose"><h2>إغلاق الشيفت — عدّ الخزينة</h2>
+  ${ME.permissions.includes("cash.close") ? `<form class="panel" id="shClose"><h2>إغلاق الشيفت — عدّ الخزينة</h2><p>${esc(sh.register_name)}</p>
     <table class="denoms"><thead><tr><th>الفئة</th><th>العدد</th><th>المبلغ</th></tr></thead><tbody>
     ${DENOMS.map((d) => `<tr><td>${denomLabel(d)}</td><td><input type="number" min="0" step="1" inputmode="numeric" data-d="${d}" class="narrow"></td><td class="num" id="dt${d}">0.00</td></tr>`).join("")}</tbody>
     <tfoot><tr><th>الإجمالي المعدود</th><th></th><th class="num big" id="dTotal">0.00</th></tr></tfoot></table>
@@ -6757,9 +6845,13 @@ async function viewShift(opts = {}) {
   document.querySelectorAll("[data-d]").forEach((inp) => inp.addEventListener("input", recalc));
   wireHist();
   if ($("#shHealth")) dayHealth($("#shHealth")).catch(() => { $("#shHealth").remove(); });
-  function wireHist() { if (recent.length) wireTools("shifts", () => ({ title: "آخر الشيفتات", subtitle: "", el: $("#shHist"), sheets: [
-    { name: "الشيفتات", columns: [Tx("من"), Tx("إلى"), Tx("أغلقها"), M("المتوقع"), M("المعدود"), M("الفرق"), Tx("ملاحظة")],
-      rows: recent.map((r) => [stamp(r.opened_at), r.closed_at ? stamp(r.closed_at) : "مفتوح", r.closed_by_name || "",
+  function wireHist() {
+    document.querySelectorAll("[data-count-shift]").forEach((b) => b.addEventListener("click", () => {
+      viewShift({ shift: b.dataset.countShift }).catch((err) => toast(err.message, true));
+    }));
+    if (recent.length) wireTools("shifts", () => ({ title: "آخر الشيفتات", subtitle: "", el: $("#shHist"), sheets: [
+    { name: "الشيفتات", columns: [Tx("الدرج"), Tx("من"), Tx("إلى"), Tx("أغلقها"), M("المتوقع"), M("المعدود"), M("الفرق"), Tx("ملاحظة")],
+      rows: recent.map((r) => [r.register_name, stamp(r.opened_at), r.closed_at ? stamp(r.closed_at) : "مفتوح", r.closed_by_name || "",
         r.expected_cash, r.counted_cash, r.difference, r.close_note || ""]) }] })); }
   $("#shPay")?.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -6776,13 +6868,13 @@ async function viewShift(opts = {}) {
       if (keeps || f.ho.checked) Object.assign(body, { float_left: toPiasters(f.fl.value) ?? null, to_account: f.to?.value || null, handover: f.ho.checked });
       const r = await api("/api/cash/close", { method: "POST", body });
       const d = r.difference, moved = r.float_left != null ? r.counted_cash - r.float_left : null;
-      app.innerHTML = `<section class="panel narrowpanel"><h1>تم إغلاق الشيفت</h1>
+      app.innerHTML = `<section class="panel narrowpanel"><h1>تم إغلاق الشيفت</h1><p>${esc(r.register_name || sh.register_name)}</p>
         <p class="result ${!d ? "b-ok" : d < 0 ? "b-err" : "b-warn"}">${!d ? "✓ الخزينة مطابقة" : d < 0 ? `✕ عجز ${money(-d)} ج` : `⚠ زيادة ${money(d)} ج`}</p>
         <div class="totals"><div>المتوقع<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div>
           ${moved != null ? `<div>اتحوّل من الدرج<b>${money(moved)}</b></div><div>الفكة للشيفت الجاي<b>${money(r.float_left)}</b></div>` : ""}</div>
         <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><button type="button" class="btn secondary" id="shNew">افتح شيفت جديدًا</button></div></section>`;
       // U2-26: the link pointed at this same screen and did nothing; open the new-shift form with the kept float
-      $("#shNew").addEventListener("click", () => viewShift({ float: r.float_left ?? undefined }));
+      $("#shNew").addEventListener("click", () => viewShift(opts.shift ? {} : { float: r.float_left ?? undefined }));
       printInFrame(`/shift-report/${r.id}`);
     } catch (err) {
       toast(err.code === "difference_note_required" ? `${err.message} (الفرق ${money(err.details.difference)})` : err.message, true);
@@ -6818,15 +6910,18 @@ const MV_SIGN = (a) => (a < 0 ? `<span class="err">− ${money(-a)}</span>` : `<
 
 async function viewMoney() {
   const accs = await moneyAccounts(true), owner = isOwnerMe(), canM = ME.permissions.includes("cash.manage");
-  const total = accs.reduce((x, a) => x + (a.balance || 0), 0);
+  const drawers = MONEY.drawer_totals?.registers;
+  const total = accs.reduce((x, a) => x + (a.id === "drawer" && drawers ? MONEY.drawer_totals.balance : a.balance || 0), 0);
   app.innerHTML = `<section class="panel"><div class="row between"><h1>الخزنة والحسابات</h1><a href="#/reconcile">مطابقة أرصدة الموردين والعملاء ←</a>${ME.permissions.includes("balances.correct") ? ` · <a href="#/opening-fix">تصحيح الأرصدة بعد النقل ←</a>` : ""}</div>
     <div class="totals"><div>كل الفلوس في البرنامج<b>${money(total)} ج</b><span>عدد الأماكن: ${accs.length}</span></div></div>
     <table><thead><tr><th>المكان</th><th>النوع</th><th>الرصيد</th><th></th></tr></thead><tbody>
-    ${accs.map((a) => `<tr><td><b>${esc(a.name)}</b>${a.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}${a.allow_negative ? ` <span class="chip">مسموح بالسالب</span>` : ""}</td>
+    ${accs.map((a) => `<tr><td><b>${esc(drawers?.length > 1 ? a.register_name || a.name : a.name)}</b>${a.is_active ? "" : ` <span class="badge b-plain">موقوف</span>`}${a.allow_negative ? ` <span class="chip">مسموح بالسالب</span>` : ""}</td>
       <td>${a.id === "drawer" ? (a.shift_open ? "الشيفت مفتوح" : "الفكة من آخر شيفت") : esc(a.kind_label || "")}</td>
       <td class="num"><b>${money(a.balance)}</b></td>
       <td class="row">${a.id === "drawer" ? `<a href="#/shift">الشيفت</a>` : `<a class="btn small secondary" href="#/money/${esc(a.id)}">كشف الحساب</a>
         ${canM && a.is_active ? `<button class="btn small secondary" data-count="${esc(a.id)}" data-name="${esc(a.name)}" data-bal="${a.balance}">جرد الحساب</button>` : ""}`}</td></tr>`).join("")}</tbody></table>
+    ${drawers?.length > 1 ? `<div class="totals"><div>إجمالي الأدراج<b>${money(MONEY.drawer_totals.balance)} ج</b></div>
+      ${drawers.map((r) => `<div>${esc(r.register_name)}<b>${money(r.balance)} ج</b></div>`).join("")}</div>` : ""}
     <div id="mCount"></div></section>
   ${canM ? `<div class="grid2"><form class="panel" id="mTr"><h2>تحويل بين الحسابات</h2>
       <label class="f">من <select name="from">${srcOptions(accs, "drawer", { outside: false })}</select></label>
@@ -8225,15 +8320,15 @@ const OWNER_REPORTS = [
   { key: "shifts", title: "إغلاقات الخزينة", perm: "cash.see_expected",
     html: (r) => `<div class="totals"><div>شيفتات أُغلقت<b>${r.totals.n}</b></div><div class="${r.totals.short ? "t-err" : ""}">العجز<b>${money(r.totals.short)}</b><span>${r.totals.short_n} <span>شيفت</span></span></div>
       <div>الزيادة<b>${money(r.totals.over)}</b><span>${r.totals.over_n} <span>شيفت</span></span></div><div>الصافي<b>${money(r.totals.net)}</b></div></div>
-      <div class="tablewrap mt"><table><thead><tr><th>فُتحت</th><th>أُغلقت</th><th>فتحها</th><th>أغلقها</th><th>البداية</th><th>فواتير</th><th>بيع نقدي</th><th>مرتجع/إلغاء</th><th>مصروف من الخزينة</th><th>المتوقع</th><th>المعدود</th><th>الفرق</th><th>السبب</th></tr></thead><tbody>
-      ${r.rows.map((x) => `<tr><td>${esc(stamp(x.opened_at))}</td><td>${esc(stamp(x.closed_at))}</td><td>${esc(x.opened_by_name || "")}</td><td>${esc(x.closed_by_name || "")}</td>
+      <div class="tablewrap mt"><table><thead><tr><th>الدرج</th><th>فُتحت</th><th>أُغلقت</th><th>فتحها</th><th>أغلقها</th><th>البداية</th><th>فواتير</th><th>بيع نقدي</th><th>مرتجع/إلغاء</th><th>مصروف من الخزينة</th><th>المتوقع</th><th>المعدود</th><th>الفرق</th><th>السبب</th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr><td>${esc(x.register_name)}</td><td>${esc(stamp(x.opened_at))}</td><td>${esc(stamp(x.closed_at))}</td><td>${esc(x.opened_by_name || "")}</td><td>${esc(x.closed_by_name || "")}</td>
         <td class="num">${money(x.opening_cash)}</td><td>${x.sales_n}</td><td class="num">${money(x.cash_sales)}</td><td class="num">${money(x.refunds)}</td><td class="num">${money(x.payouts)}</td>
         <td class="num">${money(x.expected_cash)}</td><td class="num">${money(x.counted_cash)}</td>
         <td class="num">${x.difference ? `<span class="badge ${x.difference < 0 ? "b-err" : "b-warn"}">${money(x.difference)}</span>` : `<span class="badge b-ok">✓ مطابق</span>`}</td><td>${esc(x.close_note || "")}</td></tr>`).join("")
-        || `<tr><td colspan="13" class="muted">لا توجد شيفتات أُغلقت في هذه الفترة</td></tr>`}</tbody></table></div>`,
-    sheets: (r) => [{ name: "إغلاقات الخزينة", columns: [Tx("فُتحت"), Tx("أُغلقت"), Tx("فتحها"), Tx("أغلقها"), M("البداية"), N("فواتير"), M("بيع نقدي"), M("مرتجع/إلغاء"), M("مصروف من الخزينة"), M("المتوقع"), M("المعدود"), M("الفرق"), Tx("السبب")],
-      rows: r.rows.map((x) => [stamp(x.opened_at), stamp(x.closed_at), x.opened_by_name || "", x.closed_by_name || "", x.opening_cash, x.sales_n, x.cash_sales, x.refunds, x.payouts, x.expected_cash, x.counted_cash, x.difference, x.close_note || ""]),
-      total: ["الإجمالي", "", "", "", null, null, null, null, null, null, null, r.totals.net, ""] }] },
+        || `<tr><td colspan="14" class="muted">لا توجد شيفتات أُغلقت في هذه الفترة</td></tr>`}</tbody></table></div>`,
+    sheets: (r) => [{ name: "إغلاقات الخزينة", columns: [Tx("الدرج"), Tx("فُتحت"), Tx("أُغلقت"), Tx("فتحها"), Tx("أغلقها"), M("البداية"), N("فواتير"), M("بيع نقدي"), M("مرتجع/إلغاء"), M("مصروف من الخزينة"), M("المتوقع"), M("المعدود"), M("الفرق"), Tx("السبب")],
+      rows: r.rows.map((x) => [x.register_name, stamp(x.opened_at), stamp(x.closed_at), x.opened_by_name || "", x.closed_by_name || "", x.opening_cash, x.sales_n, x.cash_sales, x.refunds, x.payouts, x.expected_cash, x.counted_cash, x.difference, x.close_note || ""]),
+      total: ["الإجمالي", "", "", "", "", null, null, null, null, null, null, null, r.totals.net, ""] }] },
   { key: "returns", title: "المرتجعات", perm: "sales.totals",
     html: (r) => `<div class="totals"><div>المرتجعات<b>${money(r.totals.total)}</b><span>${r.totals.n} <span>مرة</span></span></div><div>من المبيعات<b>${pctTxt(r.totals.pct_bp)}</b></div>
       ${Object.entries(r.totals.by_method).map(([m, v]) => `<div>${esc({ cash: "نقدي", card: "بطاقة", credit: "على الحساب", transfer: "المحفظة الأصلية" }[m] || m)}<b>${money(v)}</b></div>`).join("")}
