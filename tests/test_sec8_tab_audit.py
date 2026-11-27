@@ -99,3 +99,12 @@ class TestTabAudit(SalesCase):
         self.s.discard(phone, sid)
         [row] = self.rows("sale.tab_discarded")
         self.assertEqual((row["entity_type"], row["entity_id"]), ("cash_shift", self.shift))
+
+
+class TestOrgScope(SalesCase):
+    def test_the_employee_lookup_filters_by_org(self):              # Codex P1 on #507 (AGENTS.md: every query by org)
+        import inspect
+        from app.sales.service import Sales
+        src = inspect.getsource(Sales._audit_tab_loss)
+        self.assertIn("m.org_id=?", src)
+        self.assertNotIn("FROM users WHERE id=?\"", src)
