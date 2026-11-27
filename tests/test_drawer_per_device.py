@@ -15,6 +15,7 @@ from app.core import accounts, notify
 from app.db import Database, MIGRATIONS_DIR
 from app.finance import money
 from app.purchasing.service import Purchasing
+from app.sales import channels
 from app.sales.cash import CashDrawer
 from tests.helpers import OWNER_PW, needs_browser
 from tests.pos_browser import run_node
@@ -22,7 +23,8 @@ from tests.test_api import APICase, H
 from tests.test_cashier_acceptance import Base
 
 SETTINGS = "/api/settings/registers"
-UNBOUND = "الجهاز ده مش متربط بدرج — اربطه من الإعدادات"
+UNBOUND = ("الجهاز ده مش مربوط بدرج. المالك أو المدير يدخل على الجهاز ده بكلمة السر (مش الرقم السري)، "
+           "ويفتح «هذا الجهاز» من شاشة الشيفت، ويختار الدرج ويضغط «اربط هذا الجهاز».")
 STAFF_PW = "Synthetic-Staff-830"
 
 
@@ -61,12 +63,16 @@ class TestDrawerPerDevice(Base):
         self.assertEqual(result["code"], code)
         return result
 
-    def sell_browser(self, client):
+    def sell_browser(self, client, method="cash"):
         sid = self.s.create(self.ctx)
         sale = self.s.add_line(self.ctx, sid, self.pan, units=2)
         decisions = {str(i): "ok" for i, _ in enumerate(self.s.safety_check(self.ctx, sid))}
+        payment = {"method": method, "amount": sale["total"]}
+        if method == "card":
+            channels.ensure_defaults(self.db)
+            payment["channel_id"] = next(c["id"] for c in channels.listing(self.db, self.ctx) if c["kind"] == "card")
         return self.request(client, "POST", f"/api/sales/{sid}/complete", {
-            "payments": [{"method": "cash", "amount": sale["total"]}], "safety_decisions": decisions
+            "payments": [payment], "safety_decisions": decisions
         }).json()
 
     def test_upgrade_moves_existing_open_shift_to_register_one(self):
@@ -98,6 +104,18 @@ class TestDrawerPerDevice(Base):
                            "device_unbound")
         self.assertEqual(error["message"], UNBOUND)
         self.assertEqual(self.db.all("SELECT id FROM cash_movements"), [])
+
+    def test_forwarded_loopback_request_needs_a_binding(self):
+        main_shift = self.open(self.main)
+        for header, value in (
+            ("Forwarded", "for=192.0.2.2"),
+            ("X-Forwarded-For", "192.0.2.2"),
+            ("X-Real-IP", "192.0.2.2"),
+        ):
+            with self.subTest(header=header):
+                refused = self.request(self.main, "GET", "/api/cash/current", status=409, **{header: value})
+                self.assertEqual(refused.json()["error"]["code"], "device_unbound")
+        self.assertEqual(self.request(self.main, "GET", "/api/cash/current").json()["id"], main_shift)
 
     def test_binding_sets_private_cookie_rotates_and_requires_owner_or_manager(self):
         sub_id = self.add_sub()
@@ -170,6 +188,46 @@ class TestDrawerPerDevice(Base):
         self.assertEqual((second["sales_count"], second["voided_count"]), (0, 1))
         closed = self.request(self.main, "POST", "/api/cash/close", {"counted_cash": 14000, "shift_id": main_shift}).json()
         self.assertEqual((closed["sales_count"], closed["sales_total"]), (1, sale["total"]))
+
+    def test_card_voids_from_idle_and_unbound_devices_appear_in_original_open_shift(self):
+        main_shift = self.open(self.main)
+        self.bind(self.sub, self.add_sub())
+        sales = [self.sell_browser(self.main, "card"), self.sell_browser(self.main, "card")]
+        for device, sale in zip((self.sub, self.fresh), sales):
+            self.request(device, "POST", f"/api/sales/{sale['id']}/void", {"reason": "إلغاء تجريبي"})
+        report = self.request(self.main, "GET", f"/api/cash/shifts/{main_shift}").json()
+        self.assertEqual((report["sales_count"], report["card_total"], report["voided_count"]), (0, 0, 2))
+        self.assertEqual(report["cash_by_kind"], {})
+        self.request(self.main, "POST", "/api/cash/close", {"counted_cash": 10000, "shift_id": main_shift})
+        summary = self.request(self.main, "GET", f"/api/cash/shifts/{main_shift}/owner-summary").json()
+        self.assertEqual({void["sale_id"] for void in summary["voids"]}, {sale["id"] for sale in sales})
+
+    def test_card_refund_from_idle_device_appears_in_original_open_shift(self):
+        main_shift = self.open(self.main)
+        self.bind(self.sub, self.add_sub())
+        sale = self.sell_browser(self.main, "card")
+        self.request(self.sub, "POST", f"/api/sales/{sale['id']}/return", {
+            "lines": {sale["lines"][0]["id"]: 1}, "refund_method": "card", "reason": "مرتجع تجريبي"
+        })
+        report = self.request(self.main, "GET", f"/api/cash/shifts/{main_shift}").json()
+        self.assertEqual((report["returns_count"], report["card_refunds"]), (1, 2000))
+        self.assertEqual(report["cash_by_kind"], {})
+
+    def test_credit_events_use_branch_attribution_after_original_shift_closes(self):
+        old_shift = self.open(self.main)
+        customer = self.s.create_customer(self.ctx, name="Synthetic customer", credit_limit=12000)
+        voided = self.sell(credit=4000, customer=customer)
+        returned = self.sell(credit=4000, customer=customer)
+        self.request(self.main, "POST", "/api/cash/close", {"counted_cash": 10000, "shift_id": old_shift})
+        main_shift = self.open(self.main)
+        self.request(self.fresh, "POST", f"/api/sales/{voided['id']}/void", {"reason": "إلغاء تجريبي"})
+        self.request(self.fresh, "POST", f"/api/sales/{returned['id']}/return", {
+            "lines": {returned["lines"][0]["id"]: 1}, "refund_method": "credit", "reason": "مرتجع تجريبي"
+        })
+        current = self.request(self.main, "GET", f"/api/cash/shifts/{main_shift}").json()
+        history = self.request(self.main, "GET", f"/api/cash/shifts/{old_shift}").json()
+        self.assertEqual((current["voided_count"], current["credit_refunds"]), (1, 2000))
+        self.assertEqual((history["sales_count"], history["voided_count"], history["returns_count"]), (2, 0, 0))
 
     def test_count_is_scoped_and_only_management_can_close_another_drawer_to_the_same_treasury(self):
         main_shift = self.open(self.main)
@@ -303,7 +361,7 @@ class TestRegisterBrowser(APICase):
         result = run_node(self, r"""
 const { chromium } = require('playwright');
 (async () => {
-  const [base, password] = process.argv.slice(1);
+  const [base, password, unbound] = process.argv.slice(1);
   const browser = await chromium.launch();
   try {
     async function signIn(page) {
@@ -341,7 +399,7 @@ const { chromium } = require('playwright');
     await main.locator('#registerBind option').filter({ hasText: 'الجهاز الفرعي' }).waitFor({ state: 'attached' });
 
     await signIn(sub);
-    await sub.getByText('الجهاز ده مش متربط بدرج — اربطه من الإعدادات', { exact: true }).waitFor();
+    await sub.getByText(unbound, { exact: true }).waitFor();
     await sub.getByRole('heading', { name: 'تشغيل جهاز فرعي' }).waitFor();
     await bind(sub, 'الجهاز الفرعي');
     await Promise.all([shift(main, 'الجهاز الرئيسي', '100'), shift(sub, 'الجهاز الفرعي', '200')]);
@@ -355,7 +413,7 @@ const { chromium } = require('playwright');
     await browser.close();
   }
 })().catch((err) => { console.error(err); process.exit(1); });
-""", OWNER_PW)
+""", OWNER_PW, UNBOUND)
         self.assertEqual([x["shift"]["opening_cash"] for x in result], [10000, 20000])
         self.assertEqual(len({x["shift"]["register_id"] for x in result}), 2)
         self.assertFalse(any(x["cookieVisible"] for x in result))
