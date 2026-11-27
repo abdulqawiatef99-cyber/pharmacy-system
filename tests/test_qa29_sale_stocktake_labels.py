@@ -104,6 +104,19 @@ class TestArabicCodeLabels(APICase):
         self.assertEqual(r.status_code, 422, r.text[:300])
         self.assertEqual(r.json()["error"]["code"], "label_barcode")
 
+    def test_the_printer_check_needs_items_read_first(self):
+        from app.core.permissions import Context
+        from app.core.errors import Forbidden
+        rs.save(self.db, self.ctx, {"label_lang": "tspl", "label_target": "tcp:127.0.0.1:9100"})
+        nobody = Context(user_id=self.ctx.user_id, org_id=self.ctx.org_id, branch_id=self.ctx.branch_id,
+                         permissions=frozenset())
+        from app.printing import service as ps
+        with self.assertRaises(Forbidden):
+            ps.print_labels(self.db, nobody, [(self.bad, 1)])
+        src = (Path(__file__).resolve().parent.parent / "app" / "api" / "app.py").read_text(encoding="utf-8")
+        run = src[src.index("async def print_labels_api"):][:1200]
+        self.assertLess(run.index('ctx.require("items.read")'), run.index("_label_barcode_ok"))
+
     def test_without_the_barcode_field_the_label_prints(self):
         rs.save(self.db, self.ctx, {"label_fields": {"barcode": False}})
         r = self.c.get(f"/labels?items={self.bad}:1", headers=H)

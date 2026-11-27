@@ -3580,9 +3580,9 @@ async function viewCountSession(id) {
       toast(`تم: ${COUNT_ITEM.name_en || COUNT_ITEM.name_ar} = ${r.qty ?? qty}`);
       $("#cntItem").innerHTML = ""; q.value = ""; q.focus();
     } catch (err) {
-      if (err.code === "already_counted" && confirm(`سبق جرد الصنف بكمية ${err.details.qty}. تسجيل جرد جديد بدلًا منه؟`)) { saving = false; return save(true); }
+      if (err.code === "already_counted" && confirm(`سبق جرد الصنف بكمية ${err.details.qty}. تسجيل جرد جديد بدلًا منه؟`)) { saving = false; return await save(true); }
       // QA-29: the same +N within 2 s (double click or a double scanner read) is asked, never added silently
-      if (err.code === "repeat_add") { saving = false; if (confirm(err.message)) return save(recount, true); toast("ماتضافش تاني"); return; }
+      if (err.code === "repeat_add") { saving = false; if (confirm(err.message)) return await save(recount, true); toast("ماتضافش تاني"); return; }
       toast(err.message, true);
     } finally { saving = false; }
   };
