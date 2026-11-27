@@ -119,6 +119,13 @@ def split_for(counted: dict, target: dict, float_left: int | None = None) -> dic
     return {"keep": {}, "move": {}, "float_left": float_left, "to_treasury": total - float_left, "short": 0, "exact": False}
 
 
+def default_float(counted: dict | None, opening: int, total: int) -> int:
+    """The float a close leaves when the closer typed none: the opening cash (never more than counted), lowered to
+    what the counted notes make exactly. One rule for the close and its preview (QA-31, #500 follow-up)."""
+    wanted = min(opening, total)
+    return largest_makeable(counted, wanted) if counted and wanted else wanted
+
+
 def largest_makeable(counted: dict, at_most: int) -> int:
     """The largest amount up to `at_most` that the counted notes make exactly (25-piaster steps); 0 when none.
     The default float when the closer typed none (review of #500): the opening cash, or less when the notes

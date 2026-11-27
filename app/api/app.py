@@ -3133,6 +3133,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 raise ValidationFailed("الفكة غير صحيحة")
             if not 0 <= fl <= total:
                 raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large")
+        elif b.get("empty_float"):      # the closer emptied the box: preview the close's own default (QA-31)
+            from ..sales.cash import open_shift_id
+            sid = b.get("shift_id") if isinstance(b.get("shift_id"), str) else None
+            sid = sid or open_shift_id(db, ctx)
+            row = db.one("SELECT opening_cash FROM cash_shifts WHERE id=? AND org_id=? AND branch_id=? AND status='open'",
+                         (sid, ctx.org_id, ctx.branch_id)) if sid else None
+            wanted = min(row["opening_cash"] if row else 0, total)
+            fl = shift_tools.default_float(clean, wanted, total)
+            return J({**shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl), "wanted": wanted})
         return J(shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl))
 
     @handler
