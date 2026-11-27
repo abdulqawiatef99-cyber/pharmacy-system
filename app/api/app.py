@@ -2079,6 +2079,10 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         kwargs = dict(kind=fields.get("kind") or "items", mapping=mapping,
                       source_system=fields.get("source_system") or "generic", options=options)
         if fields.get("background") == "1":     # QA-29: a job with progress; the screen asks for it
+            # the permissions first, here: a refusal inside the job never reached the approval dialog (Codex P2)
+            from ..dataimport import service as dimp_service
+            ctx.require("items.import")
+            dimp_service._require_kind(ctx, kwargs["kind"])
             return J({"job": _start_import_job(ctx, data, name, kwargs)}, status_code=202)
         # QA-29: in a worker thread; on the event loop a 20,000-row file stopped every request for 164 s
         run = await run_in_threadpool(lambda: dimp.analyze(ctx, data, name, **kwargs))

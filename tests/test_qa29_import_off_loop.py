@@ -170,6 +170,26 @@ class TestImportOffTheLoop(APICase):
         self.assertTrue("/api/imports/jobs/" in part, "the screen polls the job")
 
 
+class TestJobPermissionsBeforeStarting(APICase):
+    """Codex P2 on #501: a refusal for the kind's own permission (opening stock needs inventory.adjust) has to reach
+    the request, so the approval dialog opens; inside the job it became a failed job and no dialog."""
+
+    def test_a_missing_kind_permission_answers_the_upload_itself(self):
+        from starlette.testclient import TestClient
+        from app.core import people
+        from tests.test_dataimport import ITEMS, sheet
+        uid = people.add_user(self.db, self.ctx, username="importer", full_name="x", password="Staff-Pass-2026",
+                              role_code="assistant")
+        people.set_exception(self.db, self.ctx, uid, "items.import", "grant")
+        c2 = TestClient(self.app)
+        self.http_login("importer", "Staff-Pass-2026", client=c2)
+        r = c2.post("/api/imports", headers=H, files={"file": ("s.xlsx", sheet(ITEMS[:2]), "application/octet-stream")},
+                    data={"kind": "opening_stock", "background": "1"})
+        self.assertNotEqual(r.status_code, 202, r.text)
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(r.json()["error"]["code"], "approval_required")
+
+
 class TestDuplicateLookupUsesTheIndex(APICase):
     def test_no_maker_name_check_is_an_index_range(self):
         base = "synthetic new 1 500mg"
