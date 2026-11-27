@@ -15,6 +15,7 @@ from ..core.errors import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.numbers import whole_number
 from ..core.permissions import Context
 from ..db import Database, new_id
+from . import registers
 
 
 def _now() -> str:
@@ -22,17 +23,37 @@ def _now() -> str:
     return iso(utcnow())
 
 
+def _register_shift(db: Database, ctx: Context, register_id: int) -> str | None:
+    row = db.one("SELECT id FROM cash_shifts WHERE org_id=? AND branch_id=? AND register_id=? AND status='open'",
+                 (ctx.org_id, ctx.branch_id, register_id))
+    return row["id"] if row else None
+
+
 def open_shift_id(db: Database, ctx: Context, branch_id: str | None = None) -> str | None:
-    r = db.one("SELECT id FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'",
-               (ctx.org_id, branch_id or ctx.branch_id))
-    return r["id"] if r else None
+    register = registers.current(db, ctx, branch_id)
+    return _register_shift(db, ctx, register["id"]) if register else None
 
 
 def require_open_shift(db: Database, ctx: Context, branch_id: str | None = None) -> str:
-    sid = open_shift_id(db, ctx, branch_id)
+    register = registers.require_current(db, ctx, branch_id)
+    sid = _register_shift(db, ctx, register["id"])
     if not sid:
-        raise Conflict("الخزينة مغلقة — افتح شيفت قبل أي عملية نقدية", code="no_open_shift")
+        raise Conflict("الدرج ده مفيش فيه شيفت مفتوح — افتح شيفت قبل أي عملية نقدية", code="no_open_shift")
     return sid
+
+
+def _shift_row(db: Database, ctx: Context, sid: str):
+    return db.one("SELECT s.*, r.name register_name FROM cash_shifts s JOIN registers r"
+                  " ON r.org_id=s.org_id AND r.branch_id=s.branch_id AND r.id=s.register_id"
+                  " WHERE s.id=? AND s.org_id=?", (sid, ctx.org_id))
+
+
+def _report_access(db: Database, ctx: Context, s) -> None:
+    if registers.can_manage(ctx) or (s["status"] == "closed" and s["closed_by"] == ctx.user_id):
+        return
+    register = registers.current(db, ctx, s["branch_id"])
+    if not register or register["id"] != s["register_id"]:
+        raise Forbidden("الشيفت ده يخص درج تاني", code="other_register_shift")
 
 
 def record(db: Database, ctx: Context, amount: int, kind: str, ref_id: str | None = None,
@@ -50,14 +71,17 @@ def record(db: Database, ctx: Context, amount: int, kind: str, ref_id: str | Non
     return shift
 
 
+def sale_counted_on_shift(closed_at: str) -> str:
+    """SQL predicate (sale alias x). A void on another drawer leaves this drawer's sale intact."""
+    return ("(x.status='completed' OR (x.status='voided' AND x.sale_no IS NOT NULL"
+            f" AND (x.voided_at>={closed_at} OR (x.void_register_recorded=1 AND x.void_shift_id IS NOT x.shift_id))))")
+
+
 def _sales_of(s) -> tuple[str, tuple]:
-    """WHERE part (alias x) for the sales a shift report counts. A closed shift keeps the sales it had at its
-    close: a same-day void after the close (it takes the cash out in the shift open at that moment) does not
-    rewrite the closed report (final review P2-1)."""
-    if s["status"] == "closed":
-        return ("x.shift_id=? AND (x.status='completed' OR (x.status='voided' AND x.sale_no IS NOT NULL"
-                " AND x.voided_at>=?))", (s["id"], s["closed_at"]))
-    return "x.shift_id=? AND x.status='completed'", (s["id"],)
+    """A closed shift keeps its sales even if they were voided later."""
+    close = "?" if s["status"] == "closed" else "NULL"
+    args = (s["id"], s["closed_at"]) if close == "?" else (s["id"],)
+    return f"x.shift_id=? AND {sale_counted_on_shift(close)}", args
 
 
 def _channels_of(db: Database, shift, where: str, args: tuple) -> list[dict]:
@@ -66,19 +90,15 @@ def _channels_of(db: Database, shift, where: str, args: tuple) -> list[dict]:
         " JOIN sales x ON x.id=p.sale_id LEFT JOIN payment_channels c ON c.id=p.channel_id AND c.org_id=p.org_id"
         f" WHERE {where} AND p.org_id=x.org_id AND p.method IN ('card','transfer') GROUP BY 1,2,3", args)]
     by_id = {(r["method"], r.pop("channel_id")): r for r in channels}
-    for r in db.all(
-        "SELECT r.channel_id, coalesce(c.name,'') channel, sum(r.total) amount"
-        " FROM sale_returns r JOIN sales x ON x.id=r.sale_id AND x.org_id=r.org_id"
-        " LEFT JOIN payment_channels c ON c.id=r.channel_id AND c.org_id=r.org_id"
-        " WHERE r.org_id=? AND x.branch_id=? AND r.refund_method='transfer'"
-        " AND r.created_at>=? AND (? IS NULL OR r.created_at<=?) GROUP BY 1,2",
-        (shift["org_id"], shift["branch_id"], shift["opened_at"], shift["closed_at"], shift["closed_at"])):
+    for r in _non_drawer_returns(db, shift, by_channel=True):
         key = ("transfer", r["channel_id"])
         row = by_id.get(key)
         if row is None:
-            row = {"method": "transfer", "channel": r["channel"], "amount": 0}
+            channel = db.one("SELECT name FROM payment_channels WHERE org_id=? AND id=?",
+                             (shift["org_id"], r["channel_id"]))
+            row = {"method": "transfer", "channel": channel["name"] if channel else "", "amount": 0}
             channels.append(row)
-        row["refunded"] = r["amount"]
+        row["refunded"] = row.get("refunded", 0) + r["amount"]
     return channels
 
 
@@ -93,25 +113,57 @@ def _voided_elsewhere(db: Database, s) -> int:
                   (s["id"], s["org_id"], s["org_id"], s["id"]))["r"]
 
 
+def _non_drawer_returns(db: Database, shift, *, by_channel: bool = False):
+    if by_channel:
+        select = "r.channel_id, sum(r.total) amount"
+        kind = "r.refund_method='transfer'"
+        grouping = "r.channel_id"
+    else:
+        select = "r.refund_method m, count(*) n, coalesce(sum(r.total),0) t, coalesce(sum(r.rounding),0) rd"
+        kind = "(r.refund_method IN ('card','credit','transfer') OR r.total=0)"
+        grouping = "r.refund_method"
+    rows = db.all(f"SELECT {select} FROM sale_returns r WHERE r.org_id=? AND r.acting_shift_id=?"
+                  f" AND {kind} GROUP BY {grouping}", (shift["org_id"], shift["id"]))
+    if shift["register_id"] == 1:
+        # Before register attribution, non-cash refunds belonged to the branch's only shift by time.
+        rows += db.all(f"SELECT {select} FROM sale_returns r JOIN sales x ON x.id=r.sale_id AND x.org_id=r.org_id"
+                       " WHERE r.org_id=? AND r.register_recorded=0 AND x.branch_id=? AND r.created_at>=?"
+                       f" AND r.created_at<=? AND {kind} GROUP BY {grouping}",
+                       (shift["org_id"], shift["branch_id"], shift["opened_at"], shift["closed_at"] or "9999-12-31"))
+    return rows
+
+
 def _returns_of(db: Database, s) -> dict:
-    """Returns made while the shift was open, by refund method (final review P2-1). Cash refunds are found
-    through their drawer movement in this shift, so the report always reconciles with the drawer. Card and
-    credit refunds (and a cash refund of 0, which moves no cash) by the shift's open-close window: return
-    times are written by the same clock and format as the shift's (Codex P2 on #323)."""
+    """Cash refunds come from drawer movements. Other returns use the shift recorded when they occurred."""
     by = {m: {"count": 0, "total": 0, "rounding": 0} for m in ("cash", "card", "credit", "transfer")}
     c = db.one("SELECT count(*) n, coalesce(sum(r.total),0) t, coalesce(sum(r.rounding),0) rd FROM sale_returns r"
-               " JOIN cash_movements m ON m.ref_id=r.id AND m.kind='refund' WHERE m.shift_id=? AND m.org_id=?",
+               " JOIN cash_movements m ON m.ref_id=r.id AND m.kind='refund' AND m.org_id=r.org_id"
+               " WHERE m.shift_id=? AND m.org_id=?",
                (s["id"], s["org_id"]))
     by["cash"] = {"count": c["n"], "total": c["t"], "rounding": c["rd"]}
-    for r in db.all("SELECT r.refund_method m, count(*) n, coalesce(sum(r.total),0) t, coalesce(sum(r.rounding),0) rd"
-                    " FROM sale_returns r"
-                    " JOIN sales x ON x.id=r.sale_id WHERE r.org_id=? AND r.created_at>=?"
-                    " AND (? IS NULL OR r.created_at<=?) AND x.org_id=? AND x.branch_id=?"
-                    " AND (r.refund_method IN ('card','credit','transfer') OR r.total=0) GROUP BY 1",
-                    (s["org_id"], s["opened_at"], s["closed_at"], s["closed_at"], s["org_id"], s["branch_id"])):
+    for r in _non_drawer_returns(db, s):
         cur = by[r["m"]]
         by[r["m"]] = {"count": cur["count"] + r["n"], "total": cur["total"] + r["t"], "rounding": cur["rounding"] + r["rd"]}
     return by
+
+
+def shift_void_filters(s) -> list[tuple[str, tuple]]:
+    """The shift that acted on each void, with existing attribution for pre-register records."""
+    filters = [("x.org_id=? AND x.void_shift_id=?", (s["org_id"], s["id"]))]
+    if s["register_id"] == 1:
+        from .service import _local_date, local_day_bounds
+
+        close = s["closed_at"] or "9999-12-31"
+        day0 = local_day_bounds(_local_date(s["opened_at"]))[0]
+        filters.extend([
+            ("x.org_id=? AND x.shift_id=? AND x.void_register_recorded=0 AND x.voided_at<?",
+             (s["org_id"], s["id"], close)),
+            ("x.org_id=? AND x.branch_id=? AND x.completed_at>=? AND x.completed_at<?"
+             " AND (x.shift_id IS NULL OR x.shift_id<>?) AND x.void_register_recorded=0"
+             " AND x.voided_at>=? AND x.voided_at<?",
+             (s["org_id"], s["branch_id"], day0, close, s["id"], s["opened_at"], close)),
+        ])
+    return [(f"{where} AND x.status='voided' AND x.sale_no IS NOT NULL", args) for where, args in filters]
 
 
 def handover_pin_on(db: Database, org_id: str) -> bool:
@@ -162,23 +214,27 @@ class CashDrawer:
         if not isinstance(opening_cash, int) or opening_cash < 0:
             raise ValidationFailed("رصيد بداية الشيفت غير صحيح")
         with self.db.transaction():
-            if open_shift_id(self.db, ctx):
+            register = registers.require_current(self.db, ctx)
+            if _register_shift(self.db, ctx, register["id"]):
                 raise Conflict("يوجد شيفت مفتوح بالفعل", code="shift_already_open")
             sid = new_id()
-            self.db.execute("INSERT INTO cash_shifts (id, org_id, branch_id, opening_cash, opened_by, opened_at)"
-                            " VALUES (?,?,?,?,?,?)", (sid, ctx.org_id, ctx.branch_id, opening_cash,
-                                                      ctx.user_id, _now()))
+            self.db.execute("INSERT INTO cash_shifts (id, org_id, branch_id, register_id, opening_cash, opened_by, opened_at)"
+                            " VALUES (?,?,?,?,?,?,?)", (sid, ctx.org_id, ctx.branch_id, register["id"], opening_cash,
+                                                        ctx.user_id, _now()))
             audit.record(self.db, ctx, "cash.shift_open", "cash_shift", sid, after={"opening_cash": opening_cash})
         return sid
 
     def summary(self, ctx: Context, shift_id: str | None = None) -> dict:
         ctx.require("sales.read")
-        shift_id = shift_id or open_shift_id(self.db, ctx)
+        if shift_id is None:
+            registers.require_current(self.db, ctx)
+            shift_id = open_shift_id(self.db, ctx)
         if not shift_id:
             raise NotFound("لا يوجد شيفت مفتوح")
-        s = self.db.one("SELECT * FROM cash_shifts WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
+        s = _shift_row(self.db, ctx, shift_id)
         if not s:
             raise NotFound("الشيفت غير موجود")
+        _report_access(self.db, ctx, s)
         by_kind = {r["kind"]: r["t"] for r in self.db.all(
             "SELECT kind, sum(amount) t FROM cash_movements WHERE shift_id=? GROUP BY kind", (shift_id,))}
         where, args = _sales_of(s)
@@ -216,6 +272,18 @@ class CashDrawer:
             shift = record(self.db, ctx, -amount if kind == "payout" else amount, kind, note=note.strip())
             audit.record(self.db, ctx, f"cash.{kind}", "cash_shift", shift, after={"amount": amount, "note": note})
 
+    def _for_close(self, ctx: Context, shift_id: str | None):
+        register = registers.require_current(self.db, ctx)
+        if shift_id is None:
+            return _shift_row(self.db, ctx, require_open_shift(self.db, ctx))
+        shift = _shift_row(self.db, ctx, shift_id)
+        if shift and shift["branch_id"] == ctx.branch_id:
+            if shift["register_id"] != register["id"] and not registers.can_manage(ctx):
+                raise Forbidden("إغلاق شيفت درج تاني للمالك أو المدير", code="other_register_shift")
+            if shift["status"] == "open":
+                return shift
+        raise Conflict("الشيفت ده اتقفل أو اتغيّر. حدّث الشاشة وعدّ الدرج من جديد", code="shift_changed")
+
     def close(self, ctx: Context, counted_cash: int | None = None, note: str | None = None,
               denominations: dict | None = None, shift_id: str | None = None, *, float_left: int | None = None,
               to_account: str | None = None, handover: bool | None = None) -> dict:
@@ -233,22 +301,18 @@ class CashDrawer:
             raise ValidationFailed("المبلغ المعدود غير صحيح")
         from ..finance import money
         with self.db.transaction():
-            sid0 = require_open_shift(self.db, ctx)
-            s0 = self.db.one("SELECT opening_cash FROM cash_shifts WHERE id=? AND org_id=?", (sid0, ctx.org_id))
+            shift = self._for_close(ctx, shift_id)
+            sid = shift["id"]
             if float_left is None and handover is None and not ctx.can("cash.manage"):
                 left = counted_cash          # nobody received it: everything stays in the drawer for the next shift
             else:
-                left = min(s0["opening_cash"], counted_cash) if float_left is None else float_left
+                left = min(shift["opening_cash"], counted_cash) if float_left is None else float_left
             if not isinstance(left, int) or isinstance(left, bool) or left < 0:
                 raise ValidationFailed("الفكة اللي هتفضل في الدرج غير صحيحة")
             if left > counted_cash:
                 raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large",
                                        details={"counted": counted_cash, "float_left": left})
             receiver = self._receiver(ctx, counted_cash - left, handover)
-            sid = require_open_shift(self.db, ctx)
-            if shift_id is not None and shift_id != sid:
-                raise Conflict("أُغلق هذا الشيفت وفُتح شيفت جديد بعده. حدّث الشاشة وعُدّ الخزينة من جديد",
-                               code="shift_changed")
             expected = self._expected(sid)
             diff = counted_cash - expected
             if diff and ctx.can("cash.see_expected") and len((note or "").strip()) < 3:
@@ -267,7 +331,7 @@ class CashDrawer:
                 who = self.db.one("SELECT full_name FROM users WHERE id=?", (ctx.user_id,))["full_name"]
                 notify.emit(self.db, ctx, "cash_difference", "error" if diff < 0 else "warning",
                             f"{'عجز' if diff < 0 else 'زيادة'} في الخزينة {abs(diff) / 100:,.2f} ج",
-                            f"إغلاق الشيفت: {who}" + (f" · {note.strip()}" if (note or "").strip() else ""),
+                            f"إغلاق الشيفت: {who} · الدرج: {shift['register_name']}" + (f" · {note.strip()}" if (note or "").strip() else ""),
                             "cash_shift", sid)
         from ..core import autobackup
         autobackup.trigger("shift_close")
@@ -310,9 +374,10 @@ class CashDrawer:
         """Closing report. The person who closed sees the result (shortage / surplus) only after
         his count is saved; the owner and managers see every shift."""
         ctx.require("sales.read")
-        s = self.db.one("SELECT * FROM cash_shifts WHERE id=? AND org_id=?", (shift_id, ctx.org_id))
+        s = _shift_row(self.db, ctx, shift_id)
         if not s:
             raise NotFound("الشيفت غير موجود")
+        _report_access(self.db, ctx, s)
         own_closed = s["status"] == "closed" and s["closed_by"] == ctx.user_id
         if not (ctx.can("cash.see_expected") or own_closed):
             raise Forbidden("تقرير الشيفت للمدير والمالك", code="forbidden")
@@ -323,22 +388,8 @@ class CashDrawer:
         sales = self.db.one("SELECT count(*) n, coalesce(sum(total),0) total, coalesce(sum(paid_card),0) card,"
                             " coalesce(sum(paid_transfer),0) transfer, coalesce(sum(on_credit),0) credit,"
                             f" coalesce(sum(discount_total),0) discount, coalesce(sum(rounding),0) rounding FROM sales x WHERE {where}", args)
-        # voided while this shift was open (a void after the close belongs to the shift open at that time)
-        voided = self.db.one("SELECT count(*) n FROM sales WHERE shift_id=? AND status='voided' AND sale_no IS NOT NULL"
-                             " AND (? IS NULL OR voided_at<?)", (shift_id, s["closed_at"], s["closed_at"]))["n"]
-        # and the same-day voids of an earlier shift's sales made while this one was open: their money left this
-        # drawer (#324 M8); the earlier shift keeps them as sales it had at its close
-        # a void is allowed on the sale's own day only, so such a sale was completed on or after the local start of
-        # the day this shift opened: that bound keeps the read to the index range of a day, not every void ever
-        from .service import _local_date, local_day_bounds
-        day0 = local_day_bounds(_local_date(s["opened_at"]))[0]
-        # a sale is completed before it is voided, so the close time also bounds completed_at (an old shift's
-        # report never reads the voids that came after it, #352 Codex P2)
-        voided += self.db.one("SELECT count(*) n FROM sales WHERE org_id=? AND branch_id=? AND status='voided'"
-                              " AND completed_at>=? AND completed_at<? AND sale_no IS NOT NULL"
-                              " AND (shift_id IS NULL OR shift_id<>?) AND voided_at>=? AND (? IS NULL OR voided_at<?)",
-                              (ctx.org_id, s["branch_id"], day0, s["closed_at"] or "9999-12-31", shift_id,
-                               s["opened_at"], s["closed_at"], s["closed_at"]))["n"]
+        voided = sum(self.db.one(f"SELECT count(*) n FROM sales x WHERE {clause}", args)["n"]
+                     for clause, args in shift_void_filters(s))
         rets = _returns_of(self.db, s)
         by_channel = _channels_of(self.db, s, where, args)
         names = {u["id"]: u["full_name"] for u in self.db.all(
@@ -371,10 +422,15 @@ class CashDrawer:
         full.update(shift_tools.report_extras(self.db, ctx, dict(s)))
         return full
 
-    def recent(self, ctx: Context, limit: int = 30) -> list[dict]:
+    def recent(self, ctx: Context, limit: int = 30, register_id: int | None = None) -> list[dict]:
         ctx.require("cash.see_expected")
+        if not registers.can_manage(ctx):
+            register_id = registers.require_current(self.db, ctx)["id"]
         return [dict(r) for r in self.db.all(
             "SELECT s.id, s.status, s.opened_at, s.closed_at, s.opening_cash, s.expected_cash, s.counted_cash,"
-            " s.difference, s.close_note, u.full_name closed_by_name FROM cash_shifts s LEFT JOIN users u"
-            " ON u.id=s.closed_by WHERE s.org_id=? AND s.branch_id=? ORDER BY s.opened_at DESC LIMIT ?",
-            (ctx.org_id, ctx.branch_id, min(limit, 200)))]
+            " s.difference, s.close_note, u.full_name closed_by_name, s.register_id, r.name register_name"
+            " FROM cash_shifts s LEFT JOIN users u ON u.id=s.closed_by JOIN registers r"
+            " ON r.org_id=s.org_id AND r.branch_id=s.branch_id AND r.id=s.register_id"
+            " WHERE s.org_id=? AND s.branch_id=?" + (" AND s.register_id=?" if register_id is not None else "")
+            + " ORDER BY s.opened_at DESC LIMIT ?",
+            (ctx.org_id, ctx.branch_id) + ((register_id,) if register_id is not None else ()) + (min(limit, 200),))]

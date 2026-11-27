@@ -24,7 +24,7 @@ from ..core.permissions import Context
 from ..db import Database, new_id
 from ..inventory import service as inventory
 from ..safety.engine import Finding, SafetyEngine
-from . import cash
+from . import cash, registers
 
 NEAR_EXPIRY_DAYS = 30
 KEEP_CHANGE_MAX = 5000            # «خليها رصيد للعميل»: 50 EGP at most, real change only
@@ -933,8 +933,8 @@ class Sales:
                            details={"lines": [{"line_no": l["line_no"], "problem": l["problem"]} for l in bad]})
         # every store sale belongs to a shift, card, transfer or credit too: a sale with no shift appears in no
         # shift report, so its card and credit amounts escaped the close (final review P2-2)
-        if not delivery and not cash.open_shift_id(self.db, ctx, preview["branch_id"]):
-            raise Conflict("الخزينة مغلقة — افتح شيفت قبل البيع", code="no_open_shift")
+        if not delivery:
+            cash.require_open_shift(self.db, ctx, preview["branch_id"])
         if delivery and not (preview["delivery"] and (preview["delivery"]["address"] or preview["delivery"]["phone"])):
             raise ValidationFailed("فاتورة التوصيل تحتاج إلى العنوان أو رقم الهاتف", code="delivery_details")
         # U2-14 (owner 22/11): card, wallet, transfer and credit are exact; only what is left for cash is rounded
@@ -1640,12 +1640,13 @@ class Sales:
                                    f" {egp(can)} ج)؛ أعد الباقي على حساب العميل",
                                    code="cash_refund_exceeds_paid", details={"max_cash": can, "refund": refund})
             rid = new_id()
-            # created_at by the same clock and format as the shift times: the shift report places card and
-            # credit refunds by them (Codex P2 on #323; the table default has milliseconds only)
+            acting_shift = (cash.require_open_shift(self.db, ctx, s["branch_id"]) if refund_method == "cash"
+                            else cash.open_shift_id(self.db, ctx, s["branch_id"]))
             self.db.execute("INSERT INTO sale_returns (id, org_id, sale_id, total, rounding, refund_method, reason,"
-                            " created_by, created_at, channel_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            " created_by, created_at, channel_id, acting_shift_id, register_recorded)"
+                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
                             (rid, ctx.org_id, sid, refund, rounding_back, refund_method, reason.strip(), ctx.user_id,
-                             _now(), channel_id))
+                             _now(), channel_id, acting_shift))
             # review P1: the sale's returns are line values (sales and profit stay exact); the money paid back,
             # with its rounding, is the return's own total and moves the drawer / card / account
             self.db.execute("UPDATE sales SET returned_total=returned_total+? WHERE id=?", (refund - rounding_back, sid))
@@ -1683,7 +1684,8 @@ class Sales:
                         f"مرتجع {_REFUND_WORD.get(refund_method, '')}{egp(refund)} ج — فاتورة {s['sale_no']}",
                         f"السبب: {reason.strip()}" + (f" · بعد {age} يوم" if age > days else "")
                         + (" · الفاتورة باعها شخص آخر" if s["created_by"] != ctx.user_id else "")
-                        + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else ""), "sale", sid)
+                        + (f" · ⚠ أصناف لا يُقبل إرجاعها: {'، '.join(restricted)}" if restricted else "")
+                        + registers.alert_suffix(self.db, ctx, s["branch_id"]), "sale", sid)
         # Codex P1: the kept change paid back with it, shown to the cashier on its own (not goods value)
         return {"return_id": rid, "refund": refund, "change_back": change_back}
 
@@ -1905,11 +1907,13 @@ class Sales:
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], -s["on_credit"], sid, ctx.user_id))
             change_back = self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
+            acting_shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?,"
-                            " version=version+1 WHERE id=?", (ctx.user_id, _now(), reason, sid))
+                            " void_shift_id=?, void_register_recorded=1, version=version+1 WHERE id=?",
+                            (ctx.user_id, _now(), reason, acting_shift, sid))
             audit.record(self.db, ctx, "sale.void", "sale", sid, after={"reason": reason})
             notify.emit(self.db, ctx, "void", "error", f"إلغاء فاتورة {s['sale_no']} — {egp(s['total'])} ج",
-                        f"السبب: {reason.strip()}", "sale", sid)
+                        f"السبب: {reason.strip()}" + registers.alert_suffix(self.db, ctx, s["branch_id"]), "sale", sid)
         # Codex P1: the kept change paid back with the void, shown to the cashier on its own
         return {**self.get(ctx, sid), "change_back": change_back}
 

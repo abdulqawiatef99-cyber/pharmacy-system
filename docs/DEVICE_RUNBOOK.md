@@ -42,3 +42,11 @@ port 8000 is in use.
 5. If every line passes and nothing `launch-critical` fails: go straight to #19 (`OWNER_TEST_PLAN.md` P1–P2
    with the real scanner, printer and drawer) in the same session. Otherwise stop, file the Issues, and fix
    them in the cloud.
+
+## Two cashier drawers on one LAN
+
+1. On the main PC, enable the pharmacy network under «البرنامج والنسخ الاحتياطي». Open «هذا الجهاز» to see the browser address and the `PHARM_ALLOWED_HOSTS` setting for a PC name.
+2. Add the secondary register. For direct printing, use a Windows printer queue installed on the main PC, including a queue shared by the secondary PC. The secondary drawer requires a dedicated receipt printer queue before its drawer pulse can be enabled.
+3. Open the shown address on the secondary PC. Sign in as owner or manager, open «هذا الجهاز», and bind the browser to the secondary register. Use the same browser profile and address for cashier work. Linking a register in another browser replaces the existing browser binding.
+4. With synthetic data, open both shifts and check that each browser shows its own register. Post a small sale on each, refund one from the other browser, and compare both drawer balances and printed receipts. Close both shifts and check the two transfers in the single main treasury.
+5. The smart update assigns the existing shift to «الجهاز الرئيسي». The main PC's local browser continues to use that drawer until an owner or manager explicitly binds it. After an explicit binding, a new profile needs its own setup.

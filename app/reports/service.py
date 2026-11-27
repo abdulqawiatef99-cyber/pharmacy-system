@@ -208,7 +208,8 @@ def home(db: Database, ctx: Context) -> dict:
         y_lo, y_hi = local_day_bounds(today - timedelta(days=7))
         out["sales_week_ago"] = db.one("SELECT coalesce(sum(total),0) t FROM sales WHERE org_id=? AND branch_id=? AND status='completed'"
                                        " AND completed_at>=? AND completed_at<?", (ctx.org_id, ctx.branch_id, y_lo, y_hi))["t"]
-    sh = db.one("SELECT id, opened_at FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'", (ctx.org_id, ctx.branch_id))
+    from ..sales import cash
+    sh = cash.open_shift_id(db, ctx)
     out["shift_open"] = bool(sh)
     if not sh:
         out["alerts"].append({"level": "warning", "text": "لا يوجد شيفت مفتوح — البيع النقدي متوقف", "link": "#/shift"})

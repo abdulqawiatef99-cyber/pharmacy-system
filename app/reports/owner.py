@@ -151,16 +151,18 @@ def staff_performance(db: Database, ctx: Context, date_from: str, date_to: str) 
 
 # ------------------------------------------------------------------ drawer closings
 def shift_closings(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
+    from ..sales.cash import sale_counted_on_shift
+
     ctx.require("cash.see_expected")
     d1, d2, lo, hi = _period(date_from, date_to)
     rows = [dict(r) for r in db.all(
         "SELECT c.id, c.opened_at, c.closed_at, c.opening_cash, c.expected_cash, c.counted_cash, c.difference, c.close_note,"
-        " uo.full_name opened_by_name, uc.full_name closed_by_name,"
+        " uo.full_name opened_by_name, uc.full_name closed_by_name, c.register_id, r.name register_name,"
         # the row says what the shift's own slip says (sales/cash.py): a sale of this shift voided after its
         # close still counts here (the void takes the cash out of the shift open at that moment), and money
         # put in the drawer is shown, so what the row shows adds up to its expected cash (#324 R18)
-        " (SELECT count(*) FROM sales s WHERE s.shift_id=c.id AND (s.status='completed' OR (s.status='voided'"
-        "  AND s.sale_no IS NOT NULL AND s.voided_at>=c.closed_at))) sales_n,"
+        " (SELECT count(*) FROM sales x WHERE x.shift_id=c.id AND x.org_id=c.org_id"
+        f" AND {sale_counted_on_shift('c.closed_at')}) sales_n,"
         " (SELECT coalesce(sum(amount),0) FROM cash_movements m WHERE m.shift_id=c.id AND m.kind='sale') cash_sales,"
         " (SELECT coalesce(sum(amount),0) FROM cash_movements m WHERE m.shift_id=c.id AND m.kind IN ('refund','void')) refunds,"
         " (SELECT coalesce(sum(amount),0) FROM cash_movements m WHERE m.shift_id=c.id AND m.kind='payout') payouts,"
@@ -168,6 +170,7 @@ def shift_closings(db: Database, ctx: Context, date_from: str, date_to: str) -> 
         " (SELECT coalesce(sum(amount),0) FROM cash_movements m WHERE m.shift_id=c.id"
         "  AND m.kind NOT IN ('sale','refund','void','payout','deposit')) other"
         " FROM cash_shifts c LEFT JOIN users uo ON uo.id=c.opened_by LEFT JOIN users uc ON uc.id=c.closed_by"
+        " JOIN registers r ON r.org_id=c.org_id AND r.branch_id=c.branch_id AND r.id=c.register_id"
         " WHERE c.org_id=? AND c.branch_id=? AND c.status='closed' AND c.closed_at>=? AND c.closed_at<? ORDER BY c.closed_at DESC",
         (ctx.org_id, ctx.branch_id, lo, hi))]
     diffs = [r["difference"] or 0 for r in rows]

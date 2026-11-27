@@ -15,8 +15,9 @@ from app.db import Database, MIGRATIONS_DIR
 from app.finance import money
 from app.purchasing.service import Purchasing
 from app.sales.cash import CashDrawer
-from tests.helpers import OWNER_PW
-from tests.test_api import H
+from tests.helpers import OWNER_PW, needs_browser
+from tests.pos_browser import run_node
+from tests.test_api import APICase, H
 from tests.test_cashier_acceptance import Base
 
 SETTINGS = "/api/settings/registers"
@@ -30,7 +31,7 @@ class TestDrawerPerDevice(Base):
         settings = replace(config.load(), data_dir=self.tmp, upload_dir=self.tmp / "up",
                            backup_dir=self.tmp / "backups", allowed_hosts=("main-fixture",))
         app = create_app(self.db, settings, Purchasing(self.db, settings))
-        self.main = TestClient(app, client=("127.0.0.1", 41000))
+        self.main = TestClient(app, client=("127.0.0.1", 41000), base_url="http://127.0.0.1")
         self.sub = TestClient(app, base_url="http://main-fixture:8765", client=("192.0.2.2", 41001))
         self.fresh = TestClient(app, base_url="http://main-fixture:8765", client=("192.0.2.3", 41002))
         for client in (self.main, self.sub, self.fresh):
@@ -155,6 +156,20 @@ class TestDrawerPerDevice(Base):
         self.assertEqual(posted, [(main_shift, "sale")] * 2 + [(sub_shift, kind) for kind in
                          ("sale", "refund", "void", "payout", "deposit", "payout", "customer_payment")])
 
+    def test_cross_register_void_does_not_erase_the_original_register_sale(self):
+        main_shift = self.open(self.main)
+        self.bind(self.sub, self.add_sub())
+        sub_shift = self.open(self.sub)
+        sale = self.sell_browser(self.main)
+        self.request(self.sub, "POST", f"/api/sales/{sale['id']}/void", {"reason": "إلغاء تجريبي"})
+        first = self.request(self.main, "GET", f"/api/cash/shifts/{main_shift}").json()
+        second = self.request(self.sub, "GET", f"/api/cash/shifts/{sub_shift}").json()
+        self.assertEqual((first["sales_count"], first["sales_total"], first["voided_count"]), (1, sale["total"], 0))
+        self.assertEqual((first["cash_by_kind"]["sale"], second["cash_by_kind"]["void"]), (sale["total"], -sale["total"]))
+        self.assertEqual((second["sales_count"], second["voided_count"]), (0, 1))
+        closed = self.request(self.main, "POST", "/api/cash/close", {"counted_cash": 14000, "shift_id": main_shift}).json()
+        self.assertEqual((closed["sales_count"], closed["sales_total"]), (1, sale["total"]))
+
     def test_count_is_scoped_and_only_management_can_close_another_drawer_to_the_same_treasury(self):
         main_shift = self.open(self.main)
         sub_id = self.add_sub()
@@ -205,6 +220,27 @@ class TestDrawerPerDevice(Base):
         self.assertIn("win:Fixture Labels", targets)
         self.assertEqual(targets[-1], "win:Fixture Main")
 
+    def test_secondary_register_does_not_pulse_the_inherited_main_printer(self):
+        from app.printing import settings as printing_settings
+
+        printing_settings.save(self.db, self.ctx, {"receipt_target": "win:Fixture Main"})
+        sub_id = self.add_sub()
+        self.bind(self.sub, sub_id)
+        self.open(self.sub)
+        with patch("app.printing.service.escpos.send") as send:
+            sale = self.sell_browser(self.sub)
+            self.assertEqual(sale["devices"]["drawer"], "none")
+            send.assert_not_called()
+        self.request(self.main, "PATCH", f"{SETTINGS}/{sub_id}", {"drawer_kick": True}, 422)
+        self.request(self.main, "PATCH", f"{SETTINGS}/{sub_id}",
+                     {"receipt_printer": "win:fixture main", "drawer_kick": True}, 422)
+        self.request(self.main, "PATCH", f"{SETTINGS}/{sub_id}",
+                     {"receipt_printer": "win:Fixture Sub", "drawer_kick": True})
+        with patch("app.printing.service.escpos.send") as send:
+            sale = self.sell_browser(self.sub)
+            self.assertEqual(sale["devices"]["drawer"], "sent")
+            self.assertEqual(send.call_args.args[0], "win:Fixture Sub")
+
     def test_shift_drawer_totals_and_lan_guide_identify_register(self):
         self.open(self.main, 10000)
         self.bind(self.sub, self.add_sub())
@@ -220,3 +256,67 @@ class TestDrawerPerDevice(Base):
         source = (Path(__file__).parents[1] / "app" / "web" / "app.js").read_text(encoding="utf-8")
         self.assertIn("تشغيل جهاز فرعي", source)
         self.assertIn("هذا الجهاز", source)
+
+
+@needs_browser
+class TestRegisterBrowser(APICase):
+    def test_two_browser_profiles_link_and_open_separate_drawers(self):
+        result = run_node(self, r"""
+const { chromium } = require('playwright');
+(async () => {
+  const [base, password] = process.argv.slice(1);
+  const browser = await chromium.launch();
+  try {
+    async function signIn(page) {
+      await page.goto(base + '/');
+      await page.evaluate(async (pw) => {
+        const reply = await fetch('/api/auth/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'pharm' },
+          body: JSON.stringify({ username: 'owner', password: pw })
+        });
+        if (!reply.ok) throw new Error('Login failed');
+      }, password);
+      await page.goto(base + '/#/registers');
+      await page.locator('#registerBind').waitFor({ timeout: 8000 });
+    }
+    async function bind(page, name) {
+      await page.locator('#registerBind select').selectOption({ label: name });
+      await page.locator('#registerBind button').click();
+      await page.getByText('تم ربط الجهاز', { exact: true }).waitFor({ timeout: 8000 });
+    }
+    async function shift(page, name, opening) {
+      await page.goto(base + '/#/shift');
+      await page.locator('#shOpen input').fill(opening);
+      await page.locator('#shOpen button').click();
+      await page.getByRole('heading', { name: 'الشيفت المفتوح — ' + name }).waitFor({ timeout: 8000 });
+    }
+
+    const main = await browser.newPage();
+    const sub = await browser.newPage();
+    await signIn(main);
+    await bind(main, 'الجهاز الرئيسي');
+    await main.getByText('أضف درج جديد', { exact: true }).click();
+    const form = main.locator('form[data-register=""]');
+    await form.locator('[name=name]').fill('الجهاز الفرعي');
+    await form.locator('button').click();
+    await main.locator('#registerBind option').filter({ hasText: 'الجهاز الفرعي' }).waitFor({ state: 'attached' });
+
+    await signIn(sub);
+    await sub.getByText('الجهاز ده مش متربط بدرج — اربطه من الإعدادات', { exact: true }).waitFor();
+    await sub.getByRole('heading', { name: 'تشغيل جهاز فرعي' }).waitFor();
+    await bind(sub, 'الجهاز الفرعي');
+    await Promise.all([shift(main, 'الجهاز الرئيسي', '100'), shift(sub, 'الجهاز الفرعي', '200')]);
+
+    const info = await Promise.all([main, sub].map((p) => p.evaluate(async () => {
+      const r = await fetch('/api/cash/current');
+      return { shift: await r.json(), cookieVisible: document.cookie.includes('pharm_register=') };
+    })));
+    console.log(JSON.stringify(info));
+  } finally {
+    await browser.close();
+  }
+})().catch((err) => { console.error(err); process.exit(1); });
+""", OWNER_PW)
+        self.assertEqual([x["shift"]["opening_cash"] for x in result], [10000, 20000])
+        self.assertEqual(len({x["shift"]["register_id"] for x in result}), 2)
+        self.assertFalse(any(x["cookieVisible"] for x in result))

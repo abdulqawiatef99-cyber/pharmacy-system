@@ -180,7 +180,8 @@ def difference_hunt(db: Database, ctx: Context, shift_id: str) -> dict:
     if not s:
         raise NotFound("الشيفت غير موجود")
     s = dict(s)
-    from .cash import _sales_of
+    from .cash import _report_access, _sales_of
+    _report_access(db, ctx, s)
     where, args = _sales_of(s)
     where, args = f"+x.org_id=? AND {where}", (ctx.org_id, *args)      # tenant filter on every read (Codex P1); + keeps the shift index
     sales = [dict(r) for r in db.all(

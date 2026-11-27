@@ -52,6 +52,7 @@ from ..recalls.service import Recalls, extract_batches
 from ..inventory.counting import Counting
 from ..procurement.service import Procurement, import_consumption
 from ..procurement import deadstock
+from ..sales import registers
 from ..sales.service import Sales
 from ..sales.cash import CashDrawer, redact_summary
 from ..printing import service as printing
@@ -260,6 +261,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not token:
             raise Unauthorized("سجّل الدخول أولًا")
         ctx = accounts.resolve_session(db, token, ip=client_ip(req))
+        peer = client_ip(req)
+        local = peer in ("127.0.0.1", "::1")
+        ctx = registers.for_request(db, ctx, req.cookies.get(registers.COOKIE), local=local)
         req.state.session_token = token
         req.scope.setdefault("state", {})["org_id"] = ctx.org_id    # the slow-request log keeps each pharmacy apart
         approver = req.headers.get("x-approver", "").strip()
@@ -348,7 +352,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         media = req.headers.get("content-type", "")
         media = media.partition(";")[0].strip().lower() if media.lower().startswith("multipart/form-data") else media
         fingerprint = hashlib.sha256(req.method.encode() + b" " + req.url.path.encode() + _query_part(req)
-                                     + b"\0" + media.encode() + b"\0" + _same_form(req, raw)).hexdigest()
+                                     + b"\0" + media.encode() + b"\0" + _same_form(req, raw)
+                                     + registers.replay_scope(ctx_of(req))).hexdigest()
         return approvals.Intent(key, fingerprint)
 
     async def _approval_summary(req: Request) -> dict:
@@ -371,6 +376,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def _idempotent(req: Request, fn):
         """Replay the stored response for a repeated POST with the same
         Idempotency-Key (client retry after a network drop / double click)."""
+        if req.url.path == "/api/settings/registers/bind":
+            return await fn(req)  # binding returns a fresh HttpOnly cookie instead of a cacheable result
         # This database-only route commits its action and replay record together.
         if req.method == "POST" and (req.url.path in ("/api/cash/movements", "/api/estock/move") or
                 (req.url.path.startswith("/api/customers/") and req.url.path.endswith("/payments"))):
@@ -382,7 +389,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = await run_in_threadpool(ctx_of, req)
         raw = await _read_body(req)
         rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req)
-                               + _same_form(req, raw)).hexdigest()
+                               + _same_form(req, raw) + registers.replay_scope(ctx)).hexdigest()
         ident = (ctx.org_id, ctx.user_id, key)
         current_permissions = ctx.permissions | ctx.approver_permissions
         # Reserve the key (status 0) before running, in one write transaction: a retry that
@@ -1569,6 +1576,37 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return sorted(ip for ip in ips if not ip.startswith("127.") and not ip.startswith("169.254."))
 
     @handler
+    async def register_settings(req):
+        ctx = ctx_of(req)
+        if req.method == "POST":
+            return J(registers.save(db, ctx, await body(req)), status_code=201)
+        out = registers.status(db, ctx)
+        if out["can_manage"]:
+            from .hostcheck import LOOPBACK
+            port = req.url.port or (443 if req.url.scheme == "https" else 80)
+            hosts = set(await run_in_threadpool(_lan_addresses)) | set(s.allowed_hosts)
+            if req.url.hostname and req.url.hostname not in LOOPBACK:
+                hosts.add(req.url.hostname)
+            authorities = [f"[{h.strip('[]')}]" if ":" in h else h for h in sorted(hosts)]
+            out.update(lan_urls=[f"http://{h}:{port}" for h in authorities],
+                       allowed_hosts=list(s.allowed_hosts))
+        return J(out)
+
+    @handler
+    async def register_update(req):
+        return J(registers.save(db, ctx_of(req), await body(req), req.path_params["id"]))
+
+    @handler
+    async def register_bind(req):
+        ctx = ctx_of(req)
+        data = await body(req)
+        row, token = registers.bind(db, ctx, _int(data.get("register_id"), "الدرج"))
+        resp = J({"current": row})
+        resp.set_cookie(registers.COOKIE, token, httponly=True, samesite="strict", secure=s.cookie_secure,
+                        max_age=registers.COOKIE_AGE, path="/")
+        return resp
+
+    @handler
     async def system_storage(req):
         from ..core import retention
         ctx = ctx_of(req)
@@ -2600,7 +2638,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         receipt = b.get("receipt") is True
         kept = given - cash_part if b.get("keep_change") is True and given > cash_part else 0
         if b.get("defer_devices") is True:
-            key = (ctx.org_id, ctx.user_id, done["id"])
+            key = (ctx.org_id, ctx.user_id, ctx.register_id, done["id"])
             if not done.get("replayed"):
                 checkout_results[key] = None
                 task = BackgroundTask(finish_checkout_devices, key, ctx, done, receipt, given - kept)
@@ -2636,7 +2674,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
     async def sales_devices(req):
         ctx = await run_in_threadpool(ctx_of, req)
         ctx.require("sales.create")
-        key = (ctx.org_id, ctx.user_id, req.path_params["id"])
+        key = (ctx.org_id, ctx.user_id, ctx.register_id, req.path_params["id"])
         if key not in checkout_results:
             raise NotFound("نتيجة أجهزة الفاتورة غير متاحة")
         return J({"devices": checkout_results[key]})
@@ -2737,7 +2775,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         raw = await req.body()
         key = req.headers.get("idempotency-key", "").strip()
-        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req) + raw).hexdigest()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req) + raw +
+                               registers.replay_scope(ctx)).hexdigest()
 
         def perform():
             resp = J({"balance": Sales(db).customer_payment(
@@ -2779,7 +2818,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         b = await body(req)
         raw = await req.body()
         key = req.headers.get("idempotency-key", "").strip()
-        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req) + raw).hexdigest()
+        rhash = hashlib.sha256(req.method.encode() + req.url.path.encode() + _query_part(req) + raw +
+                               registers.replay_scope(ctx)).hexdigest()
 
         def perform():
             drawer = CashDrawer(db)
@@ -2828,6 +2868,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                                           allow_negative=b.get("allow_negative") is True), status_code=201)
         return J({"accounts": await off_loop(money.accounts, db, ctx,
                                              include_inactive=req.query_params.get("all") == "1"),
+                  "drawer_totals": await off_loop(money.drawer_totals, db, ctx),
                   "kinds": money.ACCOUNT_KINDS, "movement_kinds": money.KINDS})
 
     @handler
@@ -2933,7 +2974,11 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def cash_shifts(req):
-        return J({"shifts": CashDrawer(db).recent(ctx_of(req))})
+        ctx = ctx_of(req)
+        value = req.query_params.get("register")
+        register_id = _int(value, "الدرج") if value else None
+        return J({"shifts": CashDrawer(db).recent(ctx, register_id=register_id),
+                  "drawer_totals": money.drawer_totals(db, ctx)})
 
     @handler
     async def customer_usual(req):
@@ -3007,6 +3052,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         from ..sales.cash import count_total
         ctx = ctx_of(req)
         ctx.require("cash.close")
+        registers.require_current(db, ctx)
         b = await body(req)
         total, clean = count_total(b.get("denominations") or {})
         fl = b.get("float_left")
@@ -3083,7 +3129,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الشيفت</title>
 <link rel="stylesheet" href="{_static_v('receipt.css')}"></head><body>
-<div class="r"><h1>{e(org)}</h1><p>تقرير إغلاق الشيفت<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
+<div class="r"><h1>{e(org)}</h1><p>تقرير إغلاق الشيفت — {e(r['register_name'])}<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
 إلى {t(r['closed_at'])} ({e(r['closed_by_name'] or '')}){dur}</p>
 <table><tr><td>عدد الفواتير</td><td>{r['sales_count']}</td></tr><tr><td>إجمالي المبيعات</td><td>{m(r['sales_total'])}</td></tr>
 {f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}
@@ -3445,7 +3491,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         ctx = ctx_of(req)
         if req.method == "PUT":
             return J(rs.save(db, ctx, await body(req)))
-        return J(rs.get(db, ctx.org_id))
+        cfg = rs.get(db, ctx.org_id)
+        return J({**cfg, "device_label_lang": printing.label_config(db, ctx, cfg)["label_lang"]})
 
     @handler
     async def health(req):
@@ -3698,6 +3745,9 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/settings/device-restore/preview", device_restore_preview, methods=["POST"]),
         Route("/api/settings/device-restore/apply", device_restore_apply, methods=["POST"]),
         Route("/api/print/label-calibrate", print_label_calibrate, methods=["POST"]),
+        Route("/api/settings/registers", register_settings, methods=["GET", "POST"]),
+        Route("/api/settings/registers/bind", register_bind, methods=["POST"]),
+        Route("/api/settings/registers/{id:int}", register_update, methods=["PATCH"]),
         Route("/api/cash/open", cash_open, methods=["POST"]),
         Route("/api/cash/current", cash_current),
         Route("/api/cash/movements", cash_move, methods=["POST"]),
