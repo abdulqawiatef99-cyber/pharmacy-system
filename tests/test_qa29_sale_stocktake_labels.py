@@ -104,6 +104,15 @@ class TestArabicCodeLabels(APICase):
         self.assertEqual(r.status_code, 422, r.text[:300])
         self.assertEqual(r.json()["error"]["code"], "label_barcode")
 
+    def test_a_label_printer_set_on_this_device_is_checked_too(self):
+        # review of QA-31 PR3: the org says browser, this device has its own label printer, so it prints direct
+        rs.save(self.db, self.ctx, {"label_lang": "browser"})
+        with self.db.transaction():
+            self.db.execute("UPDATE registers SET label_printer='tcp:127.0.0.1:9100' WHERE org_id=?", (self.ctx.org_id,))
+        r = self.c.post("/api/print/labels", headers=H, json={"items": [{"id": self.bad, "count": 1}]})
+        self.assertEqual(r.status_code, 422, r.text[:300])
+        self.assertEqual(r.json()["error"]["code"], "label_barcode")
+
     def test_the_printer_check_needs_items_read_first(self):
         from app.core.permissions import Context
         from app.core.errors import Forbidden
