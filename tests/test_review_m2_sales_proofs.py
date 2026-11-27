@@ -38,13 +38,15 @@ class TestM2_01TransferNotReceived(Base):
             self.assertEqual(e.exception.code, "cash_refund_exceeds_paid")
         self.assertEqual(self.db.one("SELECT count(*) n FROM sale_returns")["n"], 0)
 
-    def test_a_transfer_waiting_or_confirmed_still_counts(self):
+    def test_only_confirmed_transfer_counts_for_an_approved_cash_exception(self):
         self.cd.open(self.ctx, 10000)
         approved = replace(self.ctx, approver_id="manager-fixture",
                            approver_permissions=frozenset({"sales.refund_other_method"}))
         waiting = transfer_sale(self)
-        self.s.return_items(approved, waiting["id"], {waiting["lines"][0]["id"]: 1}, refund_method="cash",
-                            reason="مرتجع عميل")
+        with self.assertRaises(Conflict) as error:
+            self.s.return_items(approved, waiting["id"], {waiting["lines"][0]["id"]: 1}, refund_method="cash",
+                                reason="مرتجع عميل")
+        self.assertEqual(error.exception.details["max_cash"], 0)
         ok = transfer_sale(self)
         aid = att.attach(self.db, self.tmp, self.ctx, ok["id"], PNG)["attachments"][0]["id"]
         att.review(self.db, self.ctx, aid, True)

@@ -210,12 +210,12 @@ class TestCodexReview396(Base):
         self.assertEqual(e.exception.code, "exchange_delivery")
         self.assertFalse(self.db.one("SELECT 1 FROM sale_returns"))
 
-    def test_a_card_refund_is_not_offered_in_an_exchange(self):
+    def test_card_exchange_carries_card_value_and_charges_only_the_cash_difference(self):
         sid = self.sell(self.a, 2, paid_card=2000)
-        with self.assertRaises(ValidationFailed):
-            self.s.exchange(self.ctx, sid, {self.line(sid): 1}, self.draft(self.b, 1), refund_method="card",
-                            reason="استبدال")
-        self.assertFalse(self.db.one("SELECT 1 FROM sale_returns"))
+        out = self.s.exchange(self.ctx, sid, {self.line(sid): 1}, self.draft(self.b, 1),
+                              refund_method="card", reason="استبدال")
+        self.assertEqual((out["sale"]["paid_card"], out["sale"]["paid_cash"]), (1000, 500))
+        self.assertEqual(self.cash_sum(), 500)
 
 
 class TestCodexReview397(Base):

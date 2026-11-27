@@ -57,7 +57,7 @@ class AuditCase(PlanCase):
 class TestCashDrawer(AuditCase):
     def test_mixed_payment_counts_only_the_cash_part_once(self):
         """Cash + card + credit on one sale: the drawer takes the cash part only, the shift shows each part
-        once, the customer owes the credit part, and a full return on credit leaves the drawer untouched."""
+        once, and a full return clears each tender and its original customer debt."""
         self.open_shift()
         card = self.channel("card")
         sid = self.draft(self.cust)
@@ -71,9 +71,13 @@ class TestCashDrawer(AuditCase):
         cur = self.call("GET", "/api/cash/current")
         self.assertEqual((cur["card_total"], cur["credit_total"], cur["sales_count"]), (2000, 1200, 1))
         self.assertEqual(self.balance(), 1200)
-        self.ret(sid, done["lines"][0]["id"], 6, "credit")
-        self.assertEqual(self.drawer(), 13000)
-        self.assertEqual(self.balance(), 1200 - 6200)            # the shop now owes him the rest
+        refused = self.ret(sid, done["lines"][0]["id"], 6, "credit", expected=409)
+        self.assertEqual(refused["error"]["details"]["max_credit"], 1200)
+        self.assertEqual((self.drawer(), self.balance()), (13000, 1200))
+        refund = self.ret(sid, done["lines"][0]["id"], 6, "original")
+        self.assertEqual({p["method"]: p["amount"] for p in refund["refund_payments"]},
+                         {"cash": 3000, "card": 2000, "credit": 1200})
+        self.assertEqual((self.drawer(), self.balance()), (10000, 0))
         self.assertEqual(self.qty(self.a), 36)
 
     def test_expected_across_close_and_reopen_counts_each_movement_in_its_own_shift(self):

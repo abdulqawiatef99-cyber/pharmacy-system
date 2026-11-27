@@ -1797,35 +1797,60 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def sales_settings(req):
+        from ..sales.refunds import ALLOCATION_POLICIES, METHODS, RULE_DEFAULTS, allocation_policy, rule_settings
         from ..sales.service import LINE_ORDERS, line_order, return_window_days
         ctx = ctx_of(req)
         if req.method == "PUT":
             ctx.require("settings.manage")
             b = await body(req)
-            if "line_order" in b:
-                if b["line_order"] not in LINE_ORDERS:
-                    raise ValidationFailed("اختر ترتيب الأصناف")
-                with db.transaction():
-                    before = line_order(db, ctx.org_id)
-                    db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'line_order', ?)"
-                               " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (ctx.org_id, b["line_order"]))
-                    audit.record(db, ctx, "settings.line_order", "organization", ctx.org_id,
-                                 before={"order": before}, after={"order": b["line_order"]})
-                if "return_window_days" not in b:
-                    return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id)})
-            try:
-                days = whole_number(b.get("return_window_days"))
-            except (TypeError, ValueError):
-                raise ValidationFailed("اكتب عدد الأيام")
-            if not 0 <= days <= 365:
-                raise ValidationFailed("مدة المرتجع من 0 إلى 365 يومًا")
+            rules = RULE_DEFAULTS.keys() & b.keys()
+            if (rules or "refund_allocation" in b) and not ctx.is_owner:
+                raise Forbidden("إعدادات رد المدفوعات للمالك فقط")
+            if "line_order" in b and b["line_order"] not in LINE_ORDERS:
+                raise ValidationFailed("اختر ترتيب الأصناف")
+            if "refund_allocation" in b and b["refund_allocation"] not in ALLOCATION_POLICIES:
+                raise ValidationFailed("اختر طريقة توزيع المرتجع")
+            if "refund_order" in rules:
+                order = b["refund_order"]
+                if (not isinstance(order, list) or len(order) != len(METHODS)
+                        or not all(m in METHODS for m in order) or len(set(order)) != len(METHODS)):
+                    raise ValidationFailed("اختار ترتيب فيه كل وسيلة رد مرة واحدة")
+            for key in rules - {"refund_order"}:
+                if type(b[key]) is not bool:
+                    raise ValidationFailed("اختار تشغيل أو إيقاف لقاعدة المرتجع")
+            days = None
+            if "return_window_days" in b or not (rules or {"line_order", "refund_allocation"}.intersection(b)):
+                try:
+                    days = whole_number(b.get("return_window_days"))
+                except (TypeError, ValueError):
+                    raise ValidationFailed("اكتب عدد الأيام")
+                if not 0 <= days <= 365:
+                    raise ValidationFailed("مدة المرتجع من 0 إلى 365 يومًا")
             with db.transaction():
-                before = return_window_days(db, ctx.org_id)
-                db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, 'return_window_days', ?)"
-                           " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value", (ctx.org_id, str(days)))
-                audit.record(db, ctx, "settings.return_window", "organization", ctx.org_id,
-                             before={"days": before}, after={"days": days})
-        return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id)})
+                previous = rule_settings(db, ctx.org_id)
+                changes = [
+                    ("line_order", line_order(db, ctx.org_id), b.get("line_order"), "order"),
+                    ("return_window_days", return_window_days(db, ctx.org_id), days, "days"),
+                    ("refund_allocation", allocation_policy(db, ctx.org_id), b.get("refund_allocation"), "allocation"),
+                    *((key, previous[key], b[key], "value") for key in RULE_DEFAULTS if key in rules),
+                ]
+                for key, before, value, field in changes:
+                    if value is None:
+                        continue
+                    if isinstance(value, bool):
+                        stored = "1" if value else "0"
+                    elif isinstance(value, list):
+                        stored = ",".join(value)
+                    else:
+                        stored = str(value)
+                    db.execute("INSERT INTO org_settings (org_id, key, value) VALUES (?, ?, ?)"
+                               " ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value",
+                               (ctx.org_id, key, stored))
+                    action = "settings.return_window" if key == "return_window_days" else f"settings.{key}"
+                    audit.record(db, ctx, action, "organization", ctx.org_id,
+                                 before={field: before}, after={field: value})
+        return J({"return_window_days": return_window_days(db, ctx.org_id), "line_order": line_order(db, ctx.org_id),
+                  "refund_allocation": allocation_policy(db, ctx.org_id), **rule_settings(db, ctx.org_id)})
 
     # ------------------------------------------------------------- catalog
     @handler
@@ -2372,7 +2397,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         return J(counting.record(ctx, req.path_params["id"], item_id=str(b.get("item_id", "")),
                                  qty=qty, batch_id=b.get("batch_id"),
                                  location=str(b.get("location") or ""), mode=b.get("mode", "set"),
-                                 recount=bool(b.get("recount")), device=req.headers.get("user-agent", "")[:80]))
+                                 recount=bool(b.get("recount")), device=req.headers.get("user-agent", "")[:80],
+                                 confirm_repeat=b.get("confirm_repeat") is True))
 
     @handler
     async def counts_variances(req):
@@ -2770,29 +2796,25 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         if not isinstance(raw, dict) or not raw:
             raise ValidationFailed("اختر الأصناف والكميات المرتجعة", code="empty_return")
         lines = {str(k): _int(v, "qty") for k, v in raw.items()}
-        if b.get("preview"):               # the three totals before the cashier confirms; writes nothing
-            sales = Sales(db)
-            if b.get("new_sale_id"):          # both totals in one simulation, the returned units back first
-                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines, new_sid=str(b["new_sale_id"]),
-                                                      refund_method=str(b.get("refund_method", "")))
-            else:
-                r_value, n_total = sales.return_value(ctx, req.path_params["id"], lines,
-                                                      refund_method=str(b.get("refund_method", ""))), 0
-            return J({"returned": r_value, "new_total": n_total, "net": n_total - r_value})
+        if b.get("preview"):
+            return J(Sales(db).return_value(ctx, req.path_params["id"], lines,
+                                            new_sid=str(b["new_sale_id"]) if b.get("new_sale_id") else None,
+                                            refund_method=str(b.get("refund_method", "")),
+                                            channel_id=b.get("refund_channel_id"), quote=True))
         decisions = {int(k): str(v) for k, v in (b.get("safety_decisions") or {}).items()}
         done = Sales(db).exchange(ctx, req.path_params["id"], lines, str(b.get("new_sale_id", "")),
                                   refund_method=str(b.get("refund_method", "")), pay_method=str(b.get("pay_method", "cash")),
                                   reason=b.get("reason", ""), channel_id=b.get("channel_id") or None,
+                                  refund_channel_id=b.get("refund_channel_id") or None,
                                   version=b.get("version"),
                                   request_id=(str(b["request_id"])[:64] if b.get("request_id") else None),
                                   safety_decisions=decisions, confirm_below_cost=bool(b.get("confirm_below_cost")), cost_reason=b.get("cost_reason"),
+                                  expected_refund_due=b.get("expected_refund_due"),
                                   expected_new_total=(_int(b["expected_new_total"], "expected_new_total")
                                                       if b.get("expected_new_total") is not None else None))
         if not done.get("replayed"):        # the receipt, and the drawer only when cash really moves
             sale = done["sale"]
-            if not (done["settled"]["pay"] and done["pay_method"] == "cash") and not (
-                    done["settled"]["refund"] and done["refund_method"] == "cash"):
-                sale = {**sale, "paid_cash": 0}
+            sale = {**sale, "paid_cash": abs(done["cash_delta"])}
             done["devices"] = await run_in_threadpool(printing.checkout_devices, db, ctx, sale, b.get("receipt") is True, 0)
         return J(done)
 
@@ -3133,6 +3155,15 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 raise ValidationFailed("الفكة غير صحيحة")
             if not 0 <= fl <= total:
                 raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large")
+        elif b.get("empty_float"):      # the closer emptied the box: preview the close's own default (QA-31)
+            from ..sales.cash import open_shift_id
+            sid = b.get("shift_id") if isinstance(b.get("shift_id"), str) else None
+            sid = sid or open_shift_id(db, ctx)
+            row = db.one("SELECT opening_cash FROM cash_shifts WHERE id=? AND org_id=? AND branch_id=? AND status='open'",
+                         (sid, ctx.org_id, ctx.branch_id)) if sid else None
+            wanted = min(row["opening_cash"] if row else 0, total)
+            fl = shift_tools.default_float(clean, wanted, total)
+            return J({**shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl), "wanted": wanted})
         return J(shift_tools.split_for(clean, shift_tools.get_target(db, ctx.org_id), fl))
 
     @handler
@@ -3269,6 +3300,14 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         when = rs.fmt_when(accounts.parse_iso(r["created_at"]).astimezone(), cfg["time_format"])
         sold = accounts.parse_iso(sale["completed_at"]).astimezone().strftime("%Y-%m-%d")
         MET = {"cash": "نقدًا من الدرج", "card": "بالبطاقة", "credit": "على حساب العميل", "transfer": "إلى المحفظة الأصلية"}
+        exchange = x["exchange"]
+        parts = exchange["refund_due"] if exchange else x["refund_payments"]
+        total_back = exchange["settled"]["refund"] if exchange else r["total"]
+        tenders = "".join(
+            f"<tr><td>{MET.get(p['method'], '')}{' · ' + e(p['channel']) if p['channel'] else ''}</td>"
+            f"<td>{m(p['amount'])}</td></tr>" for p in parts)
+        exchange_value = (f"<tr><td>قيمة الأصناف المرتجعة في الاستبدال</td><td>{m(r['total'])}</td></tr>"
+                          if exchange else "")
         head = "".join(f"<p>{e(v)}</p>" for v in cfg["lines"] if v)
         info = [f"إيصال مرتجع — فاتورة رقم {sale['sale_no']}", f"بيعت <bdi dir='ltr'>{sold}</bdi> · أُرجعت <bdi dir='ltr'>{when}</bdi>",
                 f"سجّله: {e(r['by_name'] or '')}"]
@@ -3279,7 +3318,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <link rel="stylesheet" href="{_static_v('receipt.css')}">{f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if cfg['paper'] == 58 else ''}</head><body class="w{cfg['paper']}">
 <div class="r">{f"<p>{e(cfg['header'])}</p>" if cfg['header'] else ""}<h1>{e(cfg['title'] or org)}</h1>{head}<p class="tag">مرتجع</p><p>{'<br>'.join(info)}</p><hr>
 <table>{rows}</table><hr><table>
-<tr class="t"><td>المبلغ المرتجع</td><td>{m(r['total'])}</td></tr><tr><td>رُدّ</td><td>{MET.get(r['refund_method'], '')}{' · ' + e(r['channel']) if r['channel'] else ''}</td></tr></table>
+{exchange_value}<tr class="t"><td>المبلغ المرتجع</td><td>{m(total_back)}</td></tr>{tenders}</table>
 <p class="s">السبب: {e(r['reason'])}</p><p class="sig">توقيع العميل: ................</p></div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
@@ -3329,7 +3368,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
                 rows.append(f"<tr><td>{title}<small>{shown}{details}</small></td><td>{m(gross)}</td></tr>")
         MET = {"cash": "نقدي", "card": "بطاقة", "transfer": "تحويل", "credit": "آجل"}
         pays = sale.get("payments") or []
-        pay = "".join(f"<tr><td>{MET[p['method']]}{' — ' + e(p['channel']) if p.get('channel') else ''}</td><td>{m(p['amount'])}</td></tr>"
+        pay = "".join(f"<tr><td>{MET.get(p['method'], '')}{' — ' + e(p['channel']) if p.get('channel') else ''}</td><td>{m(p['amount'])}</td></tr>"
                       for p in pays)
         if not pays:
             pay = "".join(f"<tr><td>{lbl}</td><td>{m(sale[k])}</td></tr>" for k, lbl in
@@ -3409,6 +3448,25 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 <p class="f">{e(cfg['footer'])}</p>{policy}{bottom_qr}</div><script src="/static/print.js"></script></body></html>"""
         return Response(page, media_type="text/html; charset=utf-8")
 
+    def _label_barcode_ok(cfg: dict, it, data: dict) -> None:
+        """QA-29: a barcode that cannot be drawn (Code 128 is English letters and digits only; an Arabic item code
+        with no barcode) is refused with what to do, before anything prints. It was a 500 inside the hidden print
+        frame: nothing printed and nothing was said."""
+        from ..printing import barcode as bc
+        if not cfg["label_fields"].get("barcode"):
+            return
+        try:
+            bc.svg(data["value"])
+            return
+        except ValueError:
+            pass
+        name = it["name_ar"] or it["name_en"] or it["code"] or ""
+        why = (f"الكود «{data['value']}» فيه حروف مش إنجليزي، والباركود بيتطبع بحروف إنجليزية وأرقام بس"
+               if data["value"] else "مالوش باركود ولا كود يتطبع")
+        raise ValidationFailed(f"ملصق «{name}»: {why}. ضيف باركود للصنف، أو غيّر الكود لحروف إنجليزية وأرقام،"
+                               " أو اطبع الملصق من غير باركود (إعدادات الملصق).", code="label_barcode",
+                               details={"item_id": it["id"]})
+
     @handler
     async def labels_page(req):
         """Barcode labels for browser printing: ?items=<id>:<count>,... — the owner's fields and size (#84),
@@ -3430,6 +3488,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             if not it or (it["hidden"] and not ctx.can("items.hidden")):
                 continue
             data = ps.label_data(db, ctx, it, cfg)
+            _label_barcode_ok(cfg, it, data)
             try:
                 on, _dropped = lb.layout(cfg["label_fields"], data, w, h, cfg["label_dpi"])
             except lb.PrinterError as err:
@@ -3446,6 +3505,8 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
             cells += [f'<div class="lb">{top}{mark}{content}</div>'] * n
         if not cells:
             raise ValidationFailed("اختر الأصناف")
+        if req.query_params.get("check") == "1":       # QA-29: the screen asks first; nothing printed, nothing recorded
+            return Response(status_code=204)
         with db.transaction():
             audit.record(db, ctx, "print.labels", "item", None, after={"labels": len(cells), "size": f"{w:g}x{h:g}"})
         a4 = cfg["label_lang"] == "a4"
@@ -3543,7 +3604,18 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         for x in (b.get("items") or [])[:200]:
             if isinstance(x, dict) and x.get("id"):
                 wanted.append((str(x["id"]), x.get("count", 1)))
-        return J(await run_in_threadpool(ps.print_labels, db, ctx, wanted, size=b.get("size")))
+
+        def run():
+            from ..printing import settings as rs
+            ctx.require("items.read")                  # before the check names an item (review P2)
+            cfg = ps.label_config(db, ctx, rs.get(db, ctx.org_id))    # this device's own label printer wins
+            if cfg["label_lang"] not in ("browser", "a4"):          # QA-29: refused with a reason, before the printer
+                for iid, _n in wanted:
+                    it = db.one("SELECT * FROM items WHERE id=? AND org_id=?", (iid, ctx.org_id))
+                    if it and not (it["hidden"] and not ctx.can("items.hidden")):
+                        _label_barcode_ok(cfg, it, ps.label_data(db, ctx, it, cfg))
+            return ps.print_labels(db, ctx, wanted, size=b.get("size"))
+        return J(await run_in_threadpool(run))
 
     @handler
     async def receipt_logo(req):

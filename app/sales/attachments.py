@@ -124,7 +124,7 @@ def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None =
         got = transfer_state(db, ctx.org_id, r["sale_id"], sale["paid_transfer"] or 0)
         # the routed account keeps only what was confirmed to have come (Codex on #381)
         from ..finance import money
-        money.settle_transfer_review(db, ctx, r["sale_id"], got["received"])
+        money.settle_transfer_review(db, ctx, r["sale_id"], got["fresh_received"])
         if not ok:
             notify.emit(db, ctx, "transfer_problem", "error", f"مشكلة في تحويل فاتورة {sale['sale_no']} ({sale['paid_transfer'] / 100:,.2f} ج)",
                         note, "sale", r["sale_id"])
@@ -136,12 +136,56 @@ def review(db: Database, ctx: Context, att_id: str, ok: bool, note: str | None =
 
 
 def transfer_state(db: Database, org_id: str, sale_id: str, paid_transfer: int) -> dict:
-    """What a sale's transfer proofs say: `verified` (confirmed amounts; a proof approved without an amount
-    confirms the whole transfer), `received` (what may fund a refund: the whole transfer until a reviewer
-    says otherwise, by a problem or by approving only part of it; a proof still waiting adds nothing until
-    it is approved), and the report's `state`."""
-    return _state(db.all("SELECT review, confirmed_amount FROM sale_attachments WHERE org_id=? AND sale_id=?",
-                         (org_id, sale_id)), paid_transfer)
+    """A replacement proof covers fresh transfers. Wallet offsets follow their original proof."""
+    return _transfer_state(db, org_id, sale_id, paid_transfer, {})
+
+
+def _transfer_state(db, org, sale_id, paid_transfer, known, rows=None):
+    if sale_id in known:
+        return known[sale_id]
+    offsets = db.all("SELECT id,channel_id,exchange_offset,verified_exchange_offset,wallet_source_sale,wallet_source_verified"
+                     " FROM sale_payments WHERE org_id=? AND sale_id=? AND method='transfer' AND exchange_offset>0",
+                     (org, sale_id))
+    fresh_total = paid_transfer - sum(p["exchange_offset"] for p in offsets)
+    if rows is None:
+        rows = db.all("SELECT review,confirmed_amount FROM sale_attachments WHERE org_id=? AND sale_id=?",
+                      (org, sale_id))
+    fresh = _state(rows, fresh_total)
+    by_channel, by_payment = {}, {}
+    carried_problem = False
+    for p in offsets:
+        amount = p["exchange_offset"]
+        verified = received = 0
+        if p["wallet_source_sale"]:
+            source_id = p["wallet_source_sale"]
+            source_total = db.one("SELECT paid_transfer FROM sales WHERE org_id=? AND id=?", (org, source_id))
+            if source_total:
+                original = _transfer_state(db, org, source_id, source_total[0], known)
+                # A smaller approval cannot identify which of several earlier offsets it still covers.
+                if original["verified"] == source_total[0]:
+                    verified = amount
+                elif original["verified"] >= p["wallet_source_verified"]:
+                    verified = p["verified_exchange_offset"]
+                received = amount if original["received"] == source_total[0] else verified
+        if received < amount:
+            carried_problem = True
+        by_payment[p["id"]] = {"total": amount, "verified": verified, "received": received}
+        channel = by_channel.setdefault(p["channel_id"], {"total": 0, "verified": 0, "received": 0})
+        for key, value in (("total", amount), ("verified", verified), ("received", received)):
+            channel[key] += value
+    verified = fresh["verified"] + sum(p["verified"] for p in by_channel.values())
+    received = fresh["received"] + sum(p["received"] for p in by_channel.values())
+    if paid_transfer and verified == paid_transfer:
+        state = "ok"
+    elif carried_problem:
+        state = "problem"
+    else:
+        state = "pending" if offsets and fresh["state"] == "ok" else fresh["state"]
+    result = {"verified": verified, "received": received, "state": state, "offsets": by_channel,
+              "offsets_by_payment": by_payment,
+              "fresh_total": fresh_total, "fresh_verified": fresh["verified"], "fresh_received": fresh["received"]}
+    known[sale_id] = result
+    return result
 
 
 def _state(rows, paid_transfer: int) -> dict:
@@ -150,10 +194,10 @@ def _state(rows, paid_transfer: int) -> dict:
     problem = any(r["review"] == "problem" for r in rows)
     pending = any(r["review"] == "pending" for r in rows)
     partial = any(r["review"] == "ok" and r["confirmed_amount"] is not None for r in rows) and verified < paid_transfer
-    if not rows:
-        state = "missing"
-    elif verified >= paid_transfer:
+    if verified >= paid_transfer and rows:
         state = "ok"
+    elif not rows:
+        state = "missing"
     elif problem or (partial and not pending):
         state = "problem"
     else:
@@ -175,6 +219,8 @@ def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
         "SELECT s.id, s.sale_no, s.completed_at, s.paid_transfer, s.total, s.status, u.full_name cashier,"
         " (SELECT group_concat(DISTINCT c.name) FROM sale_payments p JOIN payment_channels c ON c.id=p.channel_id"
         "   WHERE p.sale_id=s.id AND p.method='transfer') channel,"
+        " (SELECT coalesce(sum(p.exchange_offset),0) FROM sale_payments p WHERE p.sale_id=s.id"
+        "   AND p.org_id=s.org_id AND p.method='transfer') exchange_offset,"
         " (SELECT count(*) FROM sale_attachments a WHERE a.org_id=s.org_id AND a.sale_id=s.id) proofs,"   # #324 B8
         " (SELECT CASE WHEN sum(a.review='problem') THEN 'problem' WHEN sum(a.review='pending') THEN 'pending'"
         "   WHEN count(*) THEN 'ok' END FROM sale_attachments a WHERE a.org_id=s.org_id AND a.sale_id=s.id) review"
@@ -188,8 +234,13 @@ def transfers(db: Database, ctx: Context, date_from: str, date_to: str) -> dict:
                     " WHERE a.org_id=? AND s.org_id=? AND s.paid_transfer>0 AND s.completed_at>=? AND s.completed_at<?",
                     (ctx.org_id, ctx.org_id, local_day_bounds(d1)[0], local_day_bounds(d2)[1])):
         proofs.setdefault(p["sale_id"], []).append(p)
+    known = {}
     for r in rows:
-        st = _state(proofs.get(r["id"], []), r["paid_transfer"])
+        own_proofs = proofs.get(r["id"], [])
+        if r.pop("exchange_offset"):
+            st = _transfer_state(db, ctx.org_id, r["id"], r["paid_transfer"], known, own_proofs)
+        else:
+            st = _state(own_proofs, r["paid_transfer"])
         r["verified"] = st["verified"]
         r["state"] = "voided" if r["status"] == "voided" else st["state"]
     live = [r for r in rows if r["state"] != "voided"]

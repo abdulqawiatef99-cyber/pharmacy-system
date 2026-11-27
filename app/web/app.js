@@ -281,10 +281,10 @@ document.addEventListener("invalid", (e) => {
   shown.focus?.();
 }, true);
 
-function toast(msg, isError = false, ms = 0) {
+function toast(msg, isError = false, ms = 0) {   // isError: true = red failure, "warn" = yellow note (QA-29)
   const t = $("#toast");
   t.textContent = msg;
-  t.className = isError ? "error" : "";
+  t.className = isError === "warn" ? "warn" : isError ? "error" : "";
   t.hidden = false;
   clearTimeout(toast._t);
   toast._t = setTimeout(() => (t.hidden = true), ms || (isError ? 7000 : 3000));
@@ -2595,7 +2595,12 @@ let LABEL_CFG = null;
 const labelSize = (f) => (f.label_preset.value === "custom" ? `${+f.label_w.value}x${+f.label_h.value}` : f.label_preset.value);
 const labelFields = (f) => Object.fromEntries([...f.querySelectorAll("[data-lf]")].map((x) => [x.dataset.lf, x.checked]));
 async function printLabels(list) {
-  const page = () => printInFrame(`/labels?items=${list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",")}`);
+  const q = list.map(([id, n]) => `${encodeURIComponent(id)}:${n}`).join(",");
+  // QA-29: the page is asked first (check=1 prints and records nothing), so a refusal is said, not lost in the frame
+  const page = async () => {
+    try { await api(`/labels?items=${q}&check=1`); } catch (er) { toast(er.message, true); return; }
+    printInFrame(`/labels?items=${q}`);
+  };
   try { LABEL_CFG = await api("/api/settings/receipt"); } catch { LABEL_CFG = { label_lang: "browser" }; }
   const mode = LABEL_CFG.device_label_lang || LABEL_CFG.label_lang;
   if (mode === "browser" || mode === "a4") return page();
@@ -3586,18 +3591,24 @@ async function viewCountSession(id) {
     $("#cntSave").addEventListener("click", () => save(false));
     $("#cntQty").addEventListener("keydown", (e) => { if (e.key === "Enter") save(false); });
   };
-  const save = async (recount) => {
+  let saving = false;
+  const save = async (recount, confirmRepeat = false) => {
     const qty = typedWhole($("#cntQty").value);
     if (qty === null || Number.isNaN(Number(qty)) || Number(qty) < 0) return toast("اكتب كمية صحيحة", true);
+    if (saving && !recount && !confirmRepeat) return;      // QA-29: a double click sends one entry
+    saving = true;
     try {
-      await api(`/api/counts/${id}/entries`, { method: "POST", body: { item_id: COUNT_ITEM.id, qty,
-        location: $("#cntLoc").value, mode: $("#cntAdd").checked ? "add" : "set", recount } });
-      toast(`تم: ${COUNT_ITEM.name_en || COUNT_ITEM.name_ar} = ${qty}`);
+      const r = await api(`/api/counts/${id}/entries`, { method: "POST", body: { item_id: COUNT_ITEM.id, qty,
+        location: $("#cntLoc").value, mode: $("#cntAdd").checked ? "add" : "set", recount, confirm_repeat: confirmRepeat } });
+      // the running total after an «إضافة», not only the number typed
+      toast(`تم: ${COUNT_ITEM.name_en || COUNT_ITEM.name_ar} = ${r.qty ?? qty}`);
       $("#cntItem").innerHTML = ""; q.value = ""; q.focus();
     } catch (err) {
-      if (err.code === "already_counted" && confirm(`سبق جرد الصنف بكمية ${err.details.qty}. تسجيل جرد جديد بدلًا منه؟`)) return save(true);
+      if (err.code === "already_counted" && confirm(`سبق جرد الصنف بكمية ${err.details.qty}. تسجيل جرد جديد بدلًا منه؟`)) { saving = false; return await save(true); }
+      // QA-29: the same +N within 2 s (double click or a double scanner read) is asked, never added silently
+      if (err.code === "repeat_add") { saving = false; if (confirm(err.message)) return await save(recount, true); toast("ماتضافش تاني"); return; }
       toast(err.message, true);
-    }
+    } finally { saving = false; }
   };
   const lookup = async () => {
     const v = q.value.trim();
@@ -4585,9 +4596,13 @@ async function viewSalesSimple() {
   }
 }
 
-// #114: the refund goes back the way the sale was paid (credit sale -> the customer's account, card only -> card);
-// the cashier can still pick another method
-function refundDefault(s) {
+// #487: mixed receipts default to the original tender allocation.
+function refundDefault(s, exchange = false) {
+  const tenders = [s.paid_cash, s.paid_card, s.paid_transfer, s.on_credit].filter((n) => n > 0).length;
+  const cards = (s.payments || []).filter((p) => p.method === "card").map((p) => p.channel);
+  const wallets = (s.payments || []).filter((p) => p.method === "transfer").map((p) => p.channel_id);
+  if (tenders > 1 || new Set(cards).size > 1 || new Set(wallets).size > 1 ||
+      (exchange && (s.paid_card || s.paid_transfer))) return "original";
   if (s.on_credit > 0 && !s.paid_cash && s.customer_id) return "credit";
   if (s.paid_card > 0 && !s.paid_cash && !s.on_credit && !s.paid_transfer) return "card";
   if (s.paid_transfer > 0 && !s.paid_cash && !s.on_credit && !s.paid_card) return "transfer";
@@ -4604,15 +4619,22 @@ function cashRefundRoom(s) {
   return Math.max(0, cashIn + (s.paid_card || 0) + (s.paid_transfer || 0) - back);
 }
 
-function refundOptions(s, includeWallet = false) {
+function refundOptions(s, includeWallet = false, exchange = false) {
   const room = cashRefundRoom(s), left = (s.total || 0) + (s.rounding || 0) - (s.returned_total || 0);
   const cash = !room ? "نقدًا من الدرج — غير متاح: الفاتورة آجل" : room < left ? `نقدًا من الدرج (حتى ${money(room)} ج)` : "نقدًا من الدرج";
-  const opts = [["cash", cash, !room], ...(s.paid_card ? [["card", "بطاقة", false]] : []),
+  const want = refundDefault(s, exchange);
+  const opts = [["cash", cash, !room], ...(want === "original" ? [["original", "حسب وسائل الدفع الأصلية", false]] : []),
+    ...(s.paid_card && !exchange ? [["card", "بطاقة", false]] : []),
     ...(includeWallet && s.paid_transfer ? [["transfer", "رجّع للمحفظة الأصلية", false]] : []),
     ...(s.customer_id ? [["credit", "على حساب العميل", false]] : [])];
-  const want = refundDefault(s), ok = opts.filter((o) => !o[2]);
+  const ok = opts.filter((o) => !o[2]);
   const pick = ok.some((o) => o[0] === want) ? want : (ok[0] || opts[0])[0];
   return opts.map(([v, t, off]) => ({ value: v, label: t, disabled: off, selected: v === pick }));
+}
+
+const REFUND_METHOD_LABELS = { cash: "نقدي", card: "بطاقة", credit: "على الحساب", transfer: "المحفظة الأصلية" };
+function refundParts(parts) {
+  return parts.map((p) => `${REFUND_METHOD_LABELS[p.method]}${p.channel ? ` · ${p.channel}` : ""} ${money(p.amount)} ج`).join("، ");
 }
 
 // ------------------------------------------------------------------ return + replacement in one operation (part 3 item 6a)
@@ -4642,7 +4664,8 @@ async function viewExchange() {
     try {
       const t = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { preview: true, lines, new_sale_id: draft.id, draft_version: draft.version, refund_method: $("#exRm").value } });
       box.innerHTML = `<div class="totals"><div>قيمة المرتجع<b>${money(t.returned)}</b></div><div>فاتورة الاستبدال<b>${money(t.new_total)}</b></div>
-        <div class="${t.net >= 0 ? "" : "t-ok"}">${t.net >= 0 ? "العميل يدفع" : "يرجع للعميل"}<b>${money(Math.abs(t.net))}</b></div></div>`;
+        <div class="${t.net >= 0 ? "" : "t-ok"}">${t.net >= 0 ? "العميل يدفع" : "يرجع للعميل"}<b>${money(Math.abs(t.net))}</b></div></div>
+        ${t.refund_due?.length ? `<p>${esc(refundParts(t.refund_due))}</p>` : ""}`;
       return { lines, t };
     } catch (e) { box.innerHTML = `<p class="badge b-err">${esc(e.message)}</p>`; return null; }
   };
@@ -4663,14 +4686,18 @@ async function viewExchange() {
       <table><thead><tr><th>الصنف</th><th>الكود</th><th>اتباع</th><th>اترجع قبل كده</th><th>متاح للمرتجع</th><th>الصافي بعد الخصم</th><th>كمية المرتجع</th></tr></thead><tbody>
       ${sale.lines.map((l) => `<tr><td>${bidi(upperEn(l.name))}</td><td>${esc(l.code || "")}</td><td>${l.sold}</td><td>${l.returned}</td><td>${l.returnable}</td><td class="num">${money(l.net)}</td>
         <td>${l.returnable ? `<input class="narrow" type="number" min="0" max="${l.returnable}" step="1" inputmode="numeric" data-xr="${esc(l.id)}">` : H("اترجع كله")}</td></tr>`).join("")}</tbody></table>
-      <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full).filter((o) => o.value !== "card").map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
+      <div class="row mt"><label class="f">المرتجع يرجع<select id="exRm">${refundOptions(full, false, true).map((o) => `<option value="${o.value}" ${o.selected ? "selected" : ""} ${o.disabled ? "disabled" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
         <label class="f grow">السبب<input id="exWhy" placeholder="مثال: العميل غيّر الصنف"></label></div>
       <h3 class="mt">أصناف الاستبدال</h3><form class="row" id="exAdd"><input name="q" class="grow" placeholder="امسح الباركود أو اكتب الصنف"><input name="n" class="narrow" type="number" min="1" step="1" value="1"><button class="btn small secondary">ضيف</button></form>
       <div id="exNew" class="mt"></div><div id="exTot" class="mt"></div><div id="exSafe" class="mt"></div>
-      <div class="row mt"><label class="f">الفرق يتدفع<select id="exPm"><option value="cash">نقدي</option><option value="card">بطاقة</option>${sale.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
-        <label class="f" id="exChW" hidden>الجهاز<select id="exCh">${(CHANNELS || []).filter((c) => c.kind === "card").map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
+      <div class="row mt"><label class="f">الفرق يتدفع<select id="exPm"><option value="cash">نقدي</option><option value="card">بطاقة</option><option value="transfer">تحويل</option>${sale.customer_id ? `<option value="credit">على حساب العميل</option>` : ""}</select></label>
+        <label class="f" id="exChW" hidden>وسيلة الدفع<select id="exCh"></select></label>
         <button class="btn big" id="exGo">سجّل المرتجع والاستبدال</button></div></section>`;
-    $("#exPm").addEventListener("change", () => { $("#exChW").hidden = $("#exPm").value !== "card" || !$("#exCh").options.length; });
+    $("#exPm").addEventListener("change", () => {
+      const channels = CHANNELS.filter((c) => c.kind === $("#exPm").value);
+      $("#exCh").innerHTML = channels.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("");
+      $("#exChW").hidden = !channels.length;
+    });
     draft = null; drawDraft(); totals();
     // safety findings of the replacement items: shown here, decided here, sent with the exchange (Codex P2 on #396)
     const showFindings = (fs) => {
@@ -4708,9 +4735,9 @@ async function viewExchange() {
       await withBusy(btn, async () => {
         try {
           const r = await api(`/api/sales/${sale.id}/exchange`, { method: "POST", body: { lines: got.lines, new_sale_id: draft.id,
-            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exPm").value === "card" ? $("#exCh").value || null : null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, cost_reason: draft.cost_reason || null, receipt: true } });
+            refund_method: $("#exRm").value, pay_method: $("#exPm").value, channel_id: $("#exCh").value || null, reason: $("#exWhy").value, version: draft.version, request_id: (draft.request_id ||= newKey()), safety_decisions: decisions(), expected_new_total: got.t.new_total, expected_refund_due: got.t.refund_due, cost_reason: draft.cost_reason || null, receipt: true } });
           exchangeDevices(r);
-          toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${money(-r.net)} ج`);
+          toast(r.net >= 0 ? `✓ اتسجل — العميل يدفع ${money(r.net)} ج` : `✓ اتسجل — يرجع للعميل ${refundParts(r.refund_due || got.t.refund_due || [])}`);
           location.hash = `#/sales/${r.sale_id}`;
         } catch (err) {
           if (err.code === "at_cost_reason") {              // U2-33: down to cost only, with a written reason
@@ -4743,6 +4770,14 @@ async function viewSale(id) {
   const s = await api(`/api/sales/${id}`);
   const can = (p) => ME?.permissions?.includes(p);
   const wallets = [...new Map(s.payments.filter((p) => p.method === "transfer").map((p) => [p.channel_id, p.channel])).entries()];
+  const returns = new Map();
+  for (const row of s.returns) {
+    const id = row.part_of || row.id;
+    if (!returns.has(id)) returns.set(id, { ...row, total: 0, parts: [] });
+    const entry = returns.get(id);
+    entry.total += row.total;
+    entry.parts.push({ method: row.refund_method, channel: row.channel, amount: row.total });
+  }
   const returnable = (l) => l.allocations.reduce((t, a) => t + a.qty - (a.returned_qty || 0), 0);
   const fq = (q, l) => fmtStock(q, { pack_size: l.item.pack_size, base_unit_name: l.item.base_unit });
   app.innerHTML = `
@@ -4756,9 +4791,9 @@ async function viewSale(id) {
       <div>العميل<b>${esc(s.customer?.name || "—")}</b></div></div>
     ${s.void_reason ? `<p class="muted">سبب الإلغاء: ${esc(s.void_reason)}</p>` : ""}</section>
   ${s.returns.length ? `<section class="panel"><h2>المرتجعات</h2><table><thead><tr><th>اليوم</th><th>المبلغ</th><th>رُدّ</th><th>السبب</th><th>سجّله</th><th></th></tr></thead><tbody>
-    ${s.returns.map((r) => `<tr><td>${esc(dayOf(r.created_at))} ${hhmm(r.created_at)}</td><td class="num">${money(r.total)}</td><td>${{ cash: "نقدي", card: "بطاقة", credit: "على الحساب", transfer: "المحفظة الأصلية" }[r.refund_method]}${r.channel ? ` · ${esc(r.channel)}` : ""}</td>
+    ${[...returns.values()].map((r) => `<tr><td>${esc(dayOf(r.created_at))} ${hhmm(r.created_at)}</td><td class="num">${money(r.total)}</td><td>${esc(refundParts(r.parts))}</td>
       <td>${esc(r.reason)}</td><td>${esc(r.by_name || "")}</td><td><a class="btn small secondary" href="/return-receipt/${esc(r.id)}" target="_blank">🖨 إيصال المرتجع</a></td></tr>`).join("")}</tbody></table></section>` : ""}
-  ${s.paid_transfer || s.attachments.length ? `<section class="panel"><h2>صورة التحويل ${s.paid_transfer && !s.attachments.length ? `<span class="badge b-warn">⚠ لا توجد صورة</span>` : ""}</h2>
+  ${s.paid_transfer || s.attachments.length ? `<section class="panel"><h2>صورة التحويل ${s.paid_transfer > (s.verified_wallet_offset || 0) && !s.attachments.length ? `<span class="badge b-warn">⚠ لا توجد صورة</span>` : ""}</h2>
     <div class="proofs">${s.attachments.map((a) => `<figure>${a.mime_type === "application/pdf" ? `<a href="/api/attachments/${esc(a.id)}" target="_blank">📄 PDF</a>`
       : `<a href="/api/attachments/${esc(a.id)}" target="_blank"><img src="/api/attachments/${esc(a.id)}" alt="صورة التحويل" loading="lazy"></a>`}
       <figcaption><span class="badge ${{ ok: "b-ok", problem: "b-err", pending: "b-warn" }[a.review]}">${{ ok: "✓ تمت مراجعتها", problem: "✕ بها مشكلة", pending: "⚠ بانتظار المراجعة" }[a.review]}</span>
@@ -4809,7 +4844,7 @@ async function viewSale(id) {
       const refund_method = $("#rMethod").value;
       const channel_id = refund_method === "transfer" ? $("#rWallet")?.value || null : null;
       const r = await api(`/api/sales/${id}/return`, { method: "POST", body: { lines, refund_method, channel_id, reason: $("#rReason").value } });
-      toast(`تم تسجيل المرتجع: ${money(r.refund)} ج${r.change_back ? ` + رجّع له نقدي ${money(r.change_back)} ج باقي كان سايبه رصيد (المجموع ${money(r.refund + r.change_back)} ج)` : ""} — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
+      toast(`تم تسجيل المرتجع: ${r.refund_payments?.length > 1 ? refundParts(r.refund_payments) : money(r.refund) + " ج"}${r.change_back ? ` + رجّع له نقدي ${money(r.change_back)} ج باقي كان سايبه رصيد (المجموع ${money(r.refund + r.change_back)} ج)` : ""} — اطبع إيصاله من "المرتجعات" أسفل`); viewSale(id);
     } catch (e) { btn.disabled = false; toast(e.message, true); }
   });
   $("#proofUp")?.addEventListener("change", async (e) => {
@@ -6613,8 +6648,9 @@ function checkoutDeviceNotice(sale, receipt, drawer, message) {
   if (drawer === "failed") warn.push("⚠ أمر فتح الدرج لم يصل للطابعة — افتحه يدويًا (F8) أو بالمفتاح");
   if (drawer === "unsupported") warn.push("⚠ الطباعة من المتصفح لا تفتح الدرج — افتحه يدويًا أو اختر طابعة مباشرة من «البرنامج ← طابعة الإيصال والدرج»");
   if (receipt === "unknown" || drawer === "unknown") warn.push("حفظ البيع تم، لكن نتيجة أمر الطباعة أو فتح الدرج غير متاحة");
-  if (warn.length) toast(`فاتورة ${sale.sale_no}
-${warn.join("\n")}`, true, 15000);
+  // QA-29: the sale IS saved: say that first; a printer or drawer problem is a yellow note, not a red failure
+  if (warn.length) toast(`✓ اتحفظ البيع — فاتورة ${sale.sale_no}
+${warn.join("\n")}`, "warn", 15000);
   else if (receipt === "sent" || drawer === "sent") toast(`فاتورة ${sale.sale_no}`
     + (receipt === "sent" ? " · أُرسل الإيصال للطابعة" : "") + (drawer === "sent" ? " · أُرسل أمر فتح الدرج" : ""));
 }
@@ -6680,14 +6716,19 @@ function wireHunt() {
     if (sm) {
       try {
         const r = await api(`/api/cash/shifts/${sm.dataset.id}/owner-summary`);
-        // UX-28: each void and cash refund of the shift on its own row, with a link to the invoice
-        const ev = [...r.voids.map((x) => ({ ...x, kind: "إلغاء" })), ...r.cash_refunds.map((x) => ({ ...x, kind: "مرتجع نقدي" }))];
+        const ev = [
+          ...r.voids.map((x) => ({ ...x, kind: "إلغاء" })),
+          ...r.cash_refunds.map((x) => ({ ...x, kind: "مرتجع نقدي" })),
+          ...(r.refund_payments || []).filter((x) => x.method !== "cash").map((x) => ({
+            ...x, at: x.created_at, kind: REFUND_METHOD_LABELS[x.method] + (x.channel ? ` · ${x.channel}` : ""),
+          })),
+        ];
         $("#shHuntOut").innerHTML = `<section class="panel"><h3>ملخص للمالك</h3><textarea id="shSumT" rows="${Math.min(24, 10 + ev.length)}" readonly>${esc(r.text)}</textarea>
           <div class="row"><button class="btn" id="shSumCopy">انسخ</button><span class="muted">البرنامج مبيبعتش حاجة: انسخه وابعته بنفسك.</span></div>
-          <h4>الإلغاء والمرتجع النقدي في الشيفت</h4>${ev.length ? `<div class="tablewrap"><table id="shSumEv"><thead><tr><th>النوع</th><th>الفاتورة</th><th>المبلغ</th><th>الوقت</th><th>مين</th><th>باعها</th><th>السبب</th></tr></thead><tbody>
-          ${ev.map((x) => `<tr><td><span class="badge ${x.kind === "إلغاء" ? "b-err" : "b-warn"}">${x.kind}</span></td><td>${x.sale_id ? `<a href="#/sales/${esc(x.sale_id)}">${esc(x.sale_no)}</a>` : esc(x.sale_no)}</td>
+          <h4>الإلغاء والمرتجعات في الشيفت</h4>${ev.length ? `<div class="tablewrap"><table id="shSumEv"><thead><tr><th>النوع</th><th>الفاتورة</th><th>المبلغ</th><th>الوقت</th><th>مين</th><th>باعها</th><th>السبب</th></tr></thead><tbody>
+          ${ev.map((x) => `<tr><td><span class="badge ${x.kind === "إلغاء" ? "b-err" : "b-warn"}">${esc(x.kind)}</span></td><td>${x.sale_id ? `<a href="#/sales/${esc(x.sale_id)}">${esc(x.sale_no)}</a>` : esc(x.sale_no)}</td>
             <td class="num">${money(x.amount)}</td><td>${esc(stamp(x.at))}</td><td>${esc(x.by || "")}</td><td>${esc(x.sold_by || "")}</td><td>${esc(x.reason || "")}</td></tr>`).join("")}</tbody></table></div>`
-          : `<p class="muted">مفيش إلغاء ولا مرتجع نقدي في الشيفت ده</p>`}
+          : `<p class="muted">مفيش إلغاء ولا مرتجعات في الشيفت ده</p>`}
           <p><b>إجمالي اليوم ${esc(r.day_date)} (كل الشيفتات):</b> إلغاء ${r.day.voids} فاتورة بـ ${money(r.day.voids_total)} ج · مرتجع نقدي ${r.day.cash_refunds} بـ ${money(r.day.cash_refunds_total)} ج</p></section>`;
         $("#shSumCopy").addEventListener("click", async () => {
           try { await navigator.clipboard.writeText(r.text); toast("اتنسخ"); } catch { $("#shSumT").select(); document.execCommand("copy"); toast("اتنسخ"); }
@@ -6760,6 +6801,8 @@ async function viewShift(opts = {}) {
       ${(sh.by_channel || []).map((c) => `<div>${c.method === "card" ? "بطاقة" : "تحويل"} — ${esc(c.channel)}
         <b>${money(c.amount - (c.refunded || 0))}</b>${c.refunded ? `<span>مبيعات ${money(c.amount)} · مرتجع ${money(c.refunded)}</span>` : ""}</div>`).join("")}
       ${sh.with_courier ? `<div>مع مندوب التوصيل لكل الأدراج<b>${money(sh.with_courier)}</b><span class="badge b-warn">⚠ لم تُسلَّم بعد</span></div>` : ""}</div>`}
+    ${sh.refund_payments?.length ? `<details class="mt"><summary>تفاصيل مبالغ المرتجعات</summary>
+      <ul>${sh.refund_payments.map((p) => `<li>فاتورة ${esc(p.sale_no)} — ${esc(refundParts([p]))}</li>`).join("")}</ul></details>` : ""}
     ${keeps && !opts.shift ? `<form id="shPay" class="row mt"><label class="f">مصروف من الخزينة (ج) <input name="a" type="number" step="0.25" min="0"></label>
       <label class="f grow">السبب <input name="n"></label><button class="btn secondary small">سجّل</button></form>` : ""}
   </section>
@@ -6789,8 +6832,8 @@ async function viewShift(opts = {}) {
     splitSoon();
   };
   // U2-30: which notes stay for the next shift and which go to the treasury, by the owner's target
-  let splitT = null;
-  const splitSoon = () => { clearTimeout(splitT); splitT = setTimeout(showSplit, 250); };
+  let splitT = null, lastSplit = null, splitSeq = 0;
+  const splitSoon = () => { clearTimeout(splitT); lastSplit = null; splitSeq++; splitT = setTimeout(showSplit, 250); };
   async function showSplit() {
     const out = $("#shSplit"); if (!out) return;
     const den = {};
@@ -6802,11 +6845,19 @@ async function viewShift(opts = {}) {
     }
     try {
       const f0 = $("#shClose"), own = f0?.fl?.dataset.touched ? toPiasters(f0.fl.value) : null;
-      const sp = await api("/api/cash/float-preview", { method: "POST", body: { denominations: den, ...(own != null ? { float_left: own } : {}) } });
+      // QA-31: an emptied box closes with the server's default float (the opening cash, or less): preview that one
+      const emptied = !!f0?.fl?.dataset.touched && own == null;
+      const seq = ++splitSeq;
+      const sp = await api("/api/cash/float-preview", { method: "POST", body: { denominations: den, shift_id: sh.id,
+        ...(own != null ? { float_left: own } : emptied ? { empty_float: true } : {}) } });
+      if (seq !== splitSeq) return;                  // an older answer after an edit: the newer one decides
+      lastSplit = sp;
       const lbl = (d) => `${+d / 100 >= 1 ? +d / 100 : `${+d} قرش`}`;
       const list = (o) => Object.entries(o).sort((a, b) => b[0] - a[0]).map(([d, n]) => `${lbl(d)} × ${n}`).join("، ") || "—";
       out.innerHTML = sp.exact === false ? `<b>سيب في الدرج:</b> ${money(sp.float_left)} ج — مفيش فئات بتعمل المبلغ ده بالظبط، عدّها بإيدك<br><b>حوّل للخزنة:</b> ${money(sp.to_treasury)} ج`
         : `<b>سيب في الدرج:</b> ${list(sp.keep)} = ${money(sp.float_left)} ج<br><b>حوّل للخزنة:</b> ${list(sp.move)} = ${money(sp.to_treasury)} ج${sp.short ? `<br>⚠ الفكة ناقصة ${money(sp.short)} ج عن المطلوب` : ""}`;
+      if (sp.wanted != null && sp.float_left < sp.wanted)
+        out.innerHTML += `<br>⚠ الفئات اللي عدّيتها ما تعملش فكة ${money(sp.wanted)} ج بالظبط، فهيفضل في الدرج ${money(sp.float_left)} ج بس`;
       const f = $("#shClose"); if (f && f.fl && !f.fl.dataset.touched) f.fl.value = money(sp.float_left);
     } catch { out.innerHTML = ""; }
   }
@@ -6845,6 +6896,15 @@ async function viewShift(opts = {}) {
     const den = {};
     document.querySelectorAll("[data-d]").forEach((inp) => { if (+inp.value) den[inp.dataset.d] = +inp.value; });
     if (!Object.keys(den).length && !confirm("لم تكتب أي فئة — أي أن الخزينة فارغة. هل تتابع؟")) return;
+    if ((keeps || e.target.ho.checked) && Object.keys(den).length) {     // QA-31: say what stays and what moves before saving
+      const countKey = () => JSON.stringify([...document.querySelectorAll("[data-d]")].map((i) => +i.value || 0))
+        + `|${e.target.fl?.value}|${e.target.ho?.checked}`;
+      const key = countKey();
+      clearTimeout(splitT); if (!lastSplit) await showSplit();
+      // Codex P2: a count edited while the preview loaded is never saved with the old numbers
+      if (countKey() !== key) { toast("العدد اتغيّر وانت بتأكد. راجع الأرقام واضغط إغلاق الشيفت تاني", true); return; }
+      if (lastSplit && !confirm(`هيفضل في الدرج ${money(lastSplit.float_left)} ج، ويتحوّل للخزنة ${money(lastSplit.to_treasury)} ج. تكمّل التقفيل؟`)) return;
+    }
     try {
       const f = e.target, body = { shift_id: sh.id, denominations: den, note: f.note.value || null };
       if (keeps || f.ho.checked) Object.assign(body, { float_left: toPiasters(f.fl.value) ?? null, to_account: f.to?.value || null, handover: f.ho.checked });
@@ -8779,7 +8839,21 @@ async function viewUsers() {
   <section class="panel"><h2>مدة المرتجع</h2>
     <form id="retWin" class="row"><label class="f">عدد الأيام <input class="narrow" type="number" min="0" max="365" name="days" value="${sales.return_window_days}"></label>
     <button class="btn small secondary">احفظ</button></form>
-    <p class="muted">بعد هذه المدة يحتاج المرتجع إلى المالك (أو من منحه المالك هذه الصلاحية "مرتجع بعد مدة المرتجع").</p></section>`;
+    <p class="muted">بعد هذه المدة يحتاج المرتجع إلى المالك (أو من منحه المالك هذه الصلاحية "مرتجع بعد مدة المرتجع").</p></section>
+  ${ME.user.role === "owner" ? `<section class="panel"><h2>قواعد رد المدفوعات</h2>
+    <form id="refundRules">
+      <label class="f">توزيع مرتجع الدفع المختلط<select name="allocation">
+        <option value="original_order" ${sales.refund_allocation === "original_order" ? "selected" : ""}>حسب الأولوية</option>
+        <option value="proportional" ${sales.refund_allocation === "proportional" ? "selected" : ""}>بنسبة المبلغ المتبقي في كل وسيلة</option>
+      </select></label>
+      <fieldset class="mt"><legend>ترتيب رد وسائل الدفع</legend><div class="row">
+        ${sales.refund_order.map((method, i) => `<label class="f">الأولوية ${i + 1}<select name="tender">
+          ${Object.entries(REFUND_METHOD_LABELS).map(([key, label]) => `<option value="${key}" ${method === key ? "selected" : ""}>${esc(label)}</option>`).join("")}
+        </select></label>`).join("")}</div></fieldset>
+      <label class="chk mt"><input type="checkbox" name="unreviewed" ${sales.refund_unreviewed_wallet ? "checked" : ""}> السماح برد تحويل المحفظة قبل مراجعته</label>
+      <label class="chk mt"><input type="checkbox" name="capCredit" ${sales.refund_cap_mixed_credit ? "checked" : ""}> حدّ الرد على حساب العميل في الدفع المختلط هو الجزء الآجل</label>
+      <button class="btn small secondary mt">احفظ</button>
+    </form></section>` : ""}`;
   document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/users/${tr.dataset.go}`; }));
   $("#uNew").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -8798,6 +8872,27 @@ async function viewUsers() {
     try { await api("/api/settings/sales", { method: "PUT", body: { return_window_days: +e.target.days.value } }); toast("تم الحفظ"); }
     catch (err) { toast(err.message, true); }
   });
+  const refundRules = $("#refundRules");
+  if (refundRules) {
+    const tenders = [...refundRules.querySelectorAll('[name="tender"]')];
+    let order = tenders.map((select) => select.value);
+    tenders.forEach((select, i) => select.addEventListener("change", () => {
+      const other = order.indexOf(select.value);
+      tenders[other].value = order[i];
+      order = tenders.map((input) => input.value);
+    }));
+    refundRules.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fields = e.target.elements;
+      try {
+        await api("/api/settings/sales", { method: "PUT", body: {
+          refund_allocation: fields.allocation.value, refund_order: order,
+          refund_unreviewed_wallet: fields.unreviewed.checked, refund_cap_mixed_credit: fields.capCredit.checked,
+        } });
+        toast("تم الحفظ");
+      } catch (err) { toast(err.message, true); }
+    });
+  }
 }
 
 async function viewUser(id) {
