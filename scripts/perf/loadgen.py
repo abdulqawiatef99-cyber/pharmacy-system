@@ -469,7 +469,14 @@ class Generator:
     def one_return(self, ctx, recent):
         s = recent.pop(self.rng.randrange(len(recent)))
         line = self.rng.choice(s["lines"])
-        method = "credit" if s.get("on_credit") else "card" if s.get("paid_card") else "cash"
+        if s.get("on_credit"):
+            method = "credit"
+        elif s.get("paid_card"):
+            method = "card"
+        elif s.get("paid_transfer"):
+            method = "transfer"
+        else:
+            method = "cash"
         try:
             self.sales.return_items(ctx, s["id"], {line["id"]: 1}, refund_method=method, reason="مرتجع تجربة")
         except (Conflict, ValidationFailed):

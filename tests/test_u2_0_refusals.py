@@ -1,5 +1,6 @@
 """U2-0 «امنع الغلط، متنبهش عليه» (OWNER_RULES §13): an impossible or illogical money / stock entry is REFUSED
 by the server, not warned about. One test per entry point; each must refuse."""
+from dataclasses import replace
 from datetime import timedelta
 
 from app.catalog import service as cat
@@ -9,6 +10,10 @@ from tests.test_sales import TODAY, SalesCase
 
 
 class Refused(SalesCase):
+    def refund_approval(self):
+        return replace(self.ctx, approver_id="manager-fixture",
+                       approver_permissions=frozenset({"sales.refund_other_method"}))
+
     def refuses(self, fn, *a, **kw):
         with self.assertRaises(AppError):
             fn(*a, **kw)
@@ -89,7 +94,8 @@ class Refused(SalesCase):
             with self.assertRaises(AppError) as e:
                 call(staff)
             self.assertEqual(e.exception.details["permission"], "sales.refund_other_method")
-        out = self.s.exchange(self.ctx, sid, {d["lines"][0]["id"]: 1}, new, refund_method="cash", pay_method="card",
+        out = self.s.exchange(self.refund_approval(), sid, {d["lines"][0]["id"]: 1}, new,
+                              refund_method="cash", pay_method="card",
                               reason="تغيير", safety_decisions=self.ack_all(new))
         self.assertEqual(out["settled"]["refund"], 0)
 
@@ -136,7 +142,7 @@ class Refused(SalesCase):
         with self.assertRaises(AppError) as e:
             self.s.return_items(staff, sid, {d["lines"][0]["id"]: 1}, refund_method="cash", reason="test")
         self.assertEqual(e.exception.details["permission"], "sales.refund_other_method")
-        r = self.s.return_items(self.ctx, sid, {d["lines"][0]["id"]: 1}, refund_method="cash", reason="test")
+        r = self.s.return_items(self.refund_approval(), sid, {d["lines"][0]["id"]: 1}, refund_method="cash", reason="test")
         self.assertGreater(r["refund"], 0)
 
 

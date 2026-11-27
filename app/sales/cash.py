@@ -57,15 +57,20 @@ def _report_access(db: Database, ctx: Context, s) -> None:
 
 
 def record(db: Database, ctx: Context, amount: int, kind: str, ref_id: str | None = None,
-           note: str | None = None, branch_id: str | None = None) -> str | None:
+           note: str | None = None, branch_id: str | None = None, *,
+           exchange_sale_id: str | None = None) -> str | None:
     """Call inside the business transaction. amount 0 is a no-op."""
     if amount == 0:
         return None
-    if kind == "payout" and amount < 0:
+    shift = require_open_shift(db, ctx, branch_id)
+    offset = 0
+    if amount < 0 and exchange_sale_id is not None:
+        offset = db.one("SELECT coalesce(sum(amount),0) FROM cash_movements"
+                        " WHERE org_id=? AND shift_id=? AND kind='sale' AND ref_id=?",
+                        (ctx.org_id, shift, exchange_sale_id))[0]
+    if amount + offset < 0:
         from ..finance import money
-        shift = money.drawer_check(db, ctx, -amount, branch_id)
-    else:
-        shift = require_open_shift(db, ctx, branch_id)
+        money.drawer_check(db, ctx, -amount, branch_id)
     db.execute("INSERT INTO cash_movements (id, org_id, shift_id, amount, kind, ref_id, note, created_by)"
                " VALUES (?,?,?,?,?,?,?,?)", (new_id(), ctx.org_id, shift, amount, kind, ref_id, note, ctx.user_id))
     return shift
@@ -300,6 +305,7 @@ class CashDrawer:
         if not isinstance(counted_cash, int) or counted_cash < 0:
             raise ValidationFailed("المبلغ المعدود غير صحيح")
         from ..finance import money
+        from . import shift_tools
         with self.db.transaction():
             shift = self._for_close(ctx, shift_id)
             sid = shift["id"]
@@ -312,6 +318,16 @@ class CashDrawer:
             if left > counted_cash:
                 raise ValidationFailed("الفكة اللي هتفضل في الدرج أكبر من المعدود", code="float_too_large",
                                        details={"counted": counted_cash, "float_left": left})
+            split = None
+            if detail and float_left is None and left:
+                # nobody typed a float: the default (the opening cash) becomes what the notes can make (review of #500)
+                left = shift_tools.largest_makeable(detail, left)
+            if detail:
+                split = shift_tools.split_for(detail, shift_tools.get_target(self.db, ctx.org_id), left)
+                if split.get("exact") is False:
+                    raise ValidationFailed("الفئات المعدودة ما تكوّنش الفكة اللي هتفضل في الدرج. اختار مبلغ من الفئات دي،"
+                                           " أو بدّل الفئات وعدّها تاني قبل التقفيل",
+                                           code="float_split_impossible", details={"float_left": left})
             receiver = self._receiver(ctx, counted_cash - left, handover)
             expected = self._expected(sid)
             diff = counted_cash - expected
@@ -325,8 +341,9 @@ class CashDrawer:
             audit.record(self.db, ctx, "cash.shift_close", "cash_shift", sid,
                          after={"expected": expected, "counted": counted_cash, "difference": diff})
             money.shift_close_transfer(self.db, ctx, sid, left, to_account=to_account, received_by=receiver)
-            from . import shift_tools
-            shift_tools.record_split(self.db, ctx, sid, detail, left)      # which notes stayed (U2-28 report)
+            if split is not None:
+                audit.record(self.db, ctx, "cash.float_split", "cash_shift", sid,
+                             after={"keep": split["keep"], "move": split["move"], "float_left": left})
             if diff:
                 who = self.db.one("SELECT full_name FROM users WHERE id=?", (ctx.user_id,))["full_name"]
                 notify.emit(self.db, ctx, "cash_difference", "error" if diff < 0 else "warning",

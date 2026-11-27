@@ -202,14 +202,18 @@ def drawer_totals(db: Database, ctx: Context) -> dict:
 
 
 def drawer_check(db: Database, ctx: Context, amount: int, branch_id: str | None = None) -> str:
-    """Refuse a drawer payout that would take the open shift's cash below zero (inside the caller's
-    transaction, before the payout row is written by its own service)."""
+    """Refuse a cash outflow that would take the open drawer below zero."""
     from ..sales import cash
     sid = cash.require_open_shift(db, ctx, branch_id)
     now = _drawer_expected(db, ctx, sid)
     if now - amount < 0:
-        raise Conflict(f"النقدية في الدرج لا تكفي ({now / 100:,.2f} ج)", code="drawer_negative",
-                       details={"balance": now, "amount": amount})
+        details = {"amount": amount}
+        message = "النقدية في الدرج لا تكفي. سجّل إيداع في الدرج قبل الصرف"
+        if ctx.can("cash.see_expected"):
+            details["balance"] = now
+            whole, fraction = divmod(max(0, now), 100)
+            message = f"النقدية في الدرج لا تكفي. الحد الأقصى المتاح {whole:,}.{fraction:02d} ج"
+        raise Conflict(message, code="drawer_negative", details=details)
     return sid
 
 

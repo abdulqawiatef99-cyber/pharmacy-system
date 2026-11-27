@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from app.core import notify
@@ -39,13 +40,15 @@ class TestM2_01TransferNotReceived(Base):
 
     def test_a_transfer_waiting_or_confirmed_still_counts(self):
         self.cd.open(self.ctx, 10000)
+        approved = replace(self.ctx, approver_id="manager-fixture",
+                           approver_permissions=frozenset({"sales.refund_other_method"}))
         waiting = transfer_sale(self)
-        self.s.return_items(self.ctx, waiting["id"], {waiting["lines"][0]["id"]: 1}, refund_method="cash",
+        self.s.return_items(approved, waiting["id"], {waiting["lines"][0]["id"]: 1}, refund_method="cash",
                             reason="مرتجع عميل")
         ok = transfer_sale(self)
         aid = att.attach(self.db, self.tmp, self.ctx, ok["id"], PNG)["attachments"][0]["id"]
         att.review(self.db, self.ctx, aid, True)
-        self.s.return_items(self.ctx, ok["id"], {ok["lines"][0]["id"]: 1}, refund_method="cash", reason="مرتجع عميل")
+        self.s.return_items(approved, ok["id"], {ok["lines"][0]["id"]: 1}, refund_method="cash", reason="مرتجع عميل")
 
 
 class TestM2_23RetriedUpload(ApiBase):

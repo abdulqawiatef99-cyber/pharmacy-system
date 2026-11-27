@@ -28,7 +28,7 @@ class _Base(Base):
     def setUp(self):
         super().setUp()
         self.assertTrue(self.run_import(tables=self.TABLES() if self.TABLES else tables())["ok"])
-        CashDrawer(self.db).open(self.ctx, 0)
+        CashDrawer(self.db).open(self.ctx, 2000)
 
     def ret(self, lines, key="k1", ctx=None, reason="مرتجع عميل"):
         return er.return_items(self.db, ctx or self.ctx, "1", lines, reason=reason, key=key)
@@ -96,6 +96,14 @@ class TestReturn(_Base):
             self.ret({"2": 7})                                # 5.00 of it would come from the drawer
         self.assertEqual(self.ledger(), [])                   # nothing written
 
+    def test_a_cash_part_needs_funds_in_the_drawer(self):
+        CashDrawer(self.db).movement(self.ctx, 2000, "payout", "تفريغ الدرج")
+        with self.assertRaises(Conflict) as refused:
+            self.ret({"2": 7})
+        self.assertEqual(refused.exception.code, "drawer_negative")
+        self.assertEqual((self.ledger(), self.cash()), ([], []))
+        self.assertFalse(self.db.one("SELECT 1 FROM stock_movements WHERE ref_type='estock_sale_return'"))
+
 
 class TestWhatEStockAlreadyReturned(_Base):
     TABLES = staticmethod(lambda: tables(
@@ -159,6 +167,7 @@ class TestCodexReview346Repeated(_Base):
     TABLES = staticmethod(lambda: _repeated())
 
     def test_p2_b_historical_return_allocated_once(self):
+        CashDrawer(self.db).movement(self.ctx, 1000, "deposit", "تمويل الدرج")
         lines = {l["line_key"]: l for l in er.invoice_lines(self.db, self.ctx, "1")}
         self.assertEqual(lines["1"]["returned_units"] + lines["3"]["returned_units"], 3)
         r = self.ret({"3": 3} if lines["3"]["returned_units"] == 0 else {"1": 3})

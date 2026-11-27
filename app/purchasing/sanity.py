@@ -11,7 +11,7 @@ def unusual_issues(db, inv, lines, items, settings):
     for line in lines:
         if line["item_id"] in items and line["qty"] and line["qty"] > 0 and (line["bonus_qty"] or 0) >= 0:
             by_item.setdefault(line["item_id"], []).append(line)
-    amounts = {line["id"]: validation.effective_amount(line) for line in lines}
+    amounts = {line["id"]: validation.effective_amount(line, draft=True) for line in lines}
     gross = sum(amount for amount in amounts.values() if amount is not None)
     total = gross - inv["extra_discount"] + inv["extra_tax"]
     cost_check = (gross > 0 or total > 0) and total >= 0 and all(

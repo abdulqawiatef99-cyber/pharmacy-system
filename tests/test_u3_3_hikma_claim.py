@@ -51,7 +51,7 @@ class TestHikmaClaim(SalesCase):
         r = hk.claim(self.db, self.ctx, "shibin", today(), today())
         pr = r["previous_returns"]
         self.assertEqual(pr["value"], 1900)
-        self.assertEqual(pr["due"], 1900 - 162)       # cost 15.77 + half of 3.23 (1.615 -> 1.62)
+        self.assertEqual(pr["due"], 3477 - 1738)      # difference between the rounded two-unit and one-unit dues
         self.assertEqual(r["due"], -pr["due"])
 
     def test_rights_and_inputs(self):
