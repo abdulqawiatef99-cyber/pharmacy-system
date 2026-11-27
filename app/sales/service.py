@@ -1276,6 +1276,10 @@ class Sales:
         if not v["items"]:
             return
         shift = cash.open_shift_id(self.db, ctx, s["branch_id"])
+        if not shift:      # a phone or counter PC with no drawer: the branch's open shift, the main drawer first
+            row = self.db.one("SELECT id FROM cash_shifts WHERE org_id=? AND branch_id=? AND status='open'"
+                              " ORDER BY register_id LIMIT 1", (ctx.org_id, s["branch_id"]))
+            shift = row["id"] if row else None
         after = {"sale_id": s["id"], "items": v["items"], "units": v["units"], "value": v["value"]}
         if reason:
             after["reason"] = reason
@@ -1353,9 +1357,12 @@ class Sales:
             if not l:
                 raise NotFound("السطر غير موجود")
             losses = self._discount_losses(ctx, sid)
+            cut = None
             if qty_base is not None:
                 if not isinstance(qty_base, int) or qty_base <= 0:
                     raise ValidationFailed("الكمية غير صحيحة")
+                if qty_base < l["qty_base"]:          # SEC8 review: a lowered quantity is audited like a removed line
+                    cut = self._tab_value(ctx, sid, line_id)
                 # more units at a typed discount is a bigger discount: the person changing the quantity must be
                 # allowed that rate (or bring an approver), as when it was typed (final review P2-3)
                 if qty_base > l["qty_base"] and discount_bp is None and l["discount_bp"] \
@@ -1391,6 +1398,10 @@ class Sales:
                                 " discount_by=?, discount_approved_by=NULL, discount_approved_bp=NULL WHERE id=?",
                                 (discount_amount, ctx.user_id if discount_amount else None, line_id))
             self.db.execute("UPDATE sales SET version=version+1 WHERE id=?", (sid,))
+            if cut is not None:
+                left = self._tab_value(ctx, sid, line_id)
+                self._audit_tab_loss(ctx, s, "sale.line_reduced", {"items": 1, "units": l["qty_base"] - qty_base,
+                                                                   "value": max(0, cut["value"] - left["value"])})
             self._check_fixed_discounts(ctx, sid, line_id if (discount_amount or qty_base is not None) else None)
             self._check_below_cost(ctx, sid, losses)
         return self.get(ctx, sid)

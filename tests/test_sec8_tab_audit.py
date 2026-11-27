@@ -75,7 +75,7 @@ class TestTabAudit(SalesCase):
         self.assertEqual((e["discarded"], e["discarded_value"], e["removed"], e["removed_value"]),
                          (1, left, 1, removed["net"]))
         self.assertIn("تبويبات اتقفلت بأصناف", r["text"])
-        self.assertIn("أصناف اتشالت من الفاتورة", r["text"])
+        self.assertIn("أصناف اتشالت أو اتقلّلت من الفاتورة", r["text"])
 
     # review of SEC8: lowering a quantity is the same theft as removing the line (P1-1)
     def test_lowering_a_quantity_is_audited_with_the_value_taken_off(self):

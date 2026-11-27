@@ -51,14 +51,15 @@ def tab_losses_of(db: Database, s) -> list[dict]:
     rows = db.all(
         "SELECT a.user_id, u.full_name, a.action, count(*) n, coalesce(sum(json_extract(a.after_json,'$.value')),0) v"
         " FROM audit_log a LEFT JOIN users u ON u.id=a.user_id WHERE a.org_id=? AND a.entity_type='cash_shift'"
-        " AND a.entity_id=? AND a.action IN ('sale.tab_discarded','sale.line_removed') GROUP BY a.user_id, a.action",
+        " AND a.entity_id=? AND a.action IN ('sale.tab_discarded','sale.line_removed','sale.line_reduced') GROUP BY a.user_id, a.action",
         (s["org_id"], s["id"]))
     out: dict = {}
     for r in rows:
         e = out.setdefault(r["user_id"], {"user_id": r["user_id"], "by": r["full_name"] or "",
                                           "discarded": 0, "discarded_value": 0, "removed": 0, "removed_value": 0})
-        key = "discarded" if r["action"] == "sale.tab_discarded" else "removed"
-        e[key], e[key + "_value"] = int(r["n"]), int(r["v"])
+        key = "discarded" if r["action"] == "sale.tab_discarded" else "removed"     # a lowered quantity counts as removed
+        e[key] += int(r["n"])
+        e[key + "_value"] += int(r["v"])
     return sorted(out.values(), key=lambda e: -(e["discarded_value"] + e["removed_value"]))
 
 
@@ -143,7 +144,7 @@ def shift_summary(db: Database, ctx: Context, shift_id: str) -> dict:
         if e["discarded"]:
             parts.append(f"تبويبات اتقفلت بأصناف {e['discarded']} بـ {_egp(e['discarded_value'])} ج")
         if e["removed"]:
-            parts.append(f"أصناف اتشالت من الفاتورة {e['removed']} بـ {_egp(e['removed_value'])} ج")
+            parts.append(f"أصناف اتشالت أو اتقلّلت من الفاتورة {e['removed']} بـ {_egp(e['removed_value'])} ج")
         lines.append(f"• {e['by']}: " + " · ".join(parts))
     lines.append(f"إجمالي اليوم {the_day.isoformat()} (كل الشيفتات): إلغاء {day['voids']} فاتورة بـ {_egp(day['voids_total'])} ج · "
                  f"مرتجع نقدي {day['cash_refunds']} بـ {_egp(day['cash_refunds_total'])} ج")
