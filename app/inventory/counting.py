@@ -40,7 +40,7 @@ def _repeat_add(db, live, qty: int) -> bool:
         return False
     if not 0 <= age < REPEAT_SECONDS:
         return False
-    prev = db.one("SELECT qty FROM count_entries WHERE superseded_by=?", (live["id"],))
+    prev = db.one("SELECT qty FROM count_entries WHERE superseded_by=? AND org_id=?", (live["id"], live["org_id"]))
     return live["qty"] - (prev["qty"] if prev else 0) == qty
 
 
