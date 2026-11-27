@@ -15,6 +15,7 @@ Rules:
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -29,6 +30,23 @@ from . import cash, registers
 NEAR_EXPIRY_DAYS = 30
 KEEP_CHANGE_MAX = 5000            # «خليها رصيد للعميل»: 50 EGP at most, real change only
 DEFAULT_RETURN_DAYS = 14         # owner 21/11 10:17: «مدة المرتجع 14 يوم»; Settings can change it
+
+
+@contextmanager
+def _void_drawer_message(ctx: Context, already_out: int):
+    """A void refused for an empty drawer says what to do next (QA-31, #500 follow-up): same code and details."""
+    try:
+        yield
+    except Conflict as e:
+        if getattr(e, "code", None) != "drawer_negative":
+            raise
+        details = dict(e.details)
+        owed = already_out + int(details.get("amount") or 0)
+        message = (f"الدرج مفيهوش نقدية كفاية علشان ترجّع {egp(owed)} ج للعميل. الأول حوّل المبلغ من الخزنة للدرج"
+                   " (الخزنة والحسابات ← تحويل بين الحسابات)، أو اطلب ده من المدير، وبعدين ألغِ الفاتورة تاني.")
+        if "balance" in details:
+            message += f" النقدية في الدرج دلوقتي {egp(max(0, details['balance']))} ج."
+        raise Conflict(message, code="drawer_negative", details=details) from None
 
 
 def egp(piasters: int) -> str:
@@ -1956,14 +1974,16 @@ class Sales:
                 self.db.execute("UPDATE sale_deliveries SET status='cancelled' WHERE sale_id=? AND org_id=?",
                                 (sid, ctx.org_id))
             else:
-                cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
+                with _void_drawer_message(ctx, 0):
+                    cash.record(self.db, ctx, -s["paid_cash"], "void", sid, reason, branch_id=s["branch_id"])
             from ..finance import money
             money.reverse_sale(self.db, ctx, sid, ref_type="sale_void", note=f"إلغاء فاتورة {s['sale_no']}")
             if s["on_credit"]:
                 self.db.execute("INSERT INTO customer_ledger (id, org_id, customer_id, amount, kind, ref_id,"
                                 " created_by) VALUES (?,?,?,?, 'void', ?, ?)",
                                 (new_id(), ctx.org_id, s["customer_id"], -s["on_credit"], sid, ctx.user_id))
-            change_back = self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
+            with _void_drawer_message(ctx, s["paid_cash"] if not dl or dl["status"] == "settled" else 0):
+                change_back = self._give_back_kept_change(ctx, s, f"إلغاء فاتورة {s['sale_no']}: الباقي اللي اتساب رصيد رجع نقدي")
             acting_shift = self._acting_shift(ctx, s)
             self.db.execute("UPDATE sales SET status='voided', voided_by=?, voided_at=?, void_reason=?,"
                             " void_shift_id=?, void_register_recorded=?, version=version+1 WHERE id=?",

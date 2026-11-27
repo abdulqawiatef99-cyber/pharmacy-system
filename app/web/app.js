@@ -6789,8 +6789,8 @@ async function viewShift(opts = {}) {
     splitSoon();
   };
   // U2-30: which notes stay for the next shift and which go to the treasury, by the owner's target
-  let splitT = null;
-  const splitSoon = () => { clearTimeout(splitT); splitT = setTimeout(showSplit, 250); };
+  let splitT = null, lastSplit = null;
+  const splitSoon = () => { clearTimeout(splitT); lastSplit = null; splitT = setTimeout(showSplit, 250); };
   async function showSplit() {
     const out = $("#shSplit"); if (!out) return;
     const den = {};
@@ -6802,11 +6802,17 @@ async function viewShift(opts = {}) {
     }
     try {
       const f0 = $("#shClose"), own = f0?.fl?.dataset.touched ? toPiasters(f0.fl.value) : null;
-      const sp = await api("/api/cash/float-preview", { method: "POST", body: { denominations: den, ...(own != null ? { float_left: own } : {}) } });
+      // QA-31: an emptied box closes with the server's default float (the opening cash, or less): preview that one
+      const emptied = !!f0?.fl?.dataset.touched && own == null;
+      const sp = await api("/api/cash/float-preview", { method: "POST", body: { denominations: den, shift_id: sh.id,
+        ...(own != null ? { float_left: own } : emptied ? { empty_float: true } : {}) } });
+      lastSplit = sp;
       const lbl = (d) => `${+d / 100 >= 1 ? +d / 100 : `${+d} قرش`}`;
       const list = (o) => Object.entries(o).sort((a, b) => b[0] - a[0]).map(([d, n]) => `${lbl(d)} × ${n}`).join("، ") || "—";
       out.innerHTML = sp.exact === false ? `<b>سيب في الدرج:</b> ${money(sp.float_left)} ج — مفيش فئات بتعمل المبلغ ده بالظبط، عدّها بإيدك<br><b>حوّل للخزنة:</b> ${money(sp.to_treasury)} ج`
         : `<b>سيب في الدرج:</b> ${list(sp.keep)} = ${money(sp.float_left)} ج<br><b>حوّل للخزنة:</b> ${list(sp.move)} = ${money(sp.to_treasury)} ج${sp.short ? `<br>⚠ الفكة ناقصة ${money(sp.short)} ج عن المطلوب` : ""}`;
+      if (sp.wanted != null && sp.float_left < sp.wanted)
+        out.innerHTML += `<br>⚠ الفئات اللي عدّيتها ما تعملش فكة ${money(sp.wanted)} ج بالظبط، فهيفضل في الدرج ${money(sp.float_left)} ج بس`;
       const f = $("#shClose"); if (f && f.fl && !f.fl.dataset.touched) f.fl.value = money(sp.float_left);
     } catch { out.innerHTML = ""; }
   }
@@ -6848,6 +6854,10 @@ async function viewShift(opts = {}) {
     try {
       const f = e.target, body = { shift_id: sh.id, denominations: den, note: f.note.value || null };
       if (keeps || f.ho.checked) Object.assign(body, { float_left: toPiasters(f.fl.value) ?? null, to_account: f.to?.value || null, handover: f.ho.checked });
+      if ((keeps || f.ho.checked) && Object.keys(den).length) {     // QA-31: say what stays and what moves before saving
+        clearTimeout(splitT); if (!lastSplit) await showSplit();
+        if (lastSplit && !confirm(`هيفضل في الدرج ${money(lastSplit.float_left)} ج، ويتحوّل للخزنة ${money(lastSplit.to_treasury)} ج. تكمّل التقفيل؟`)) return;
+      }
       const r = await api("/api/cash/close", { method: "POST", body });
       const d = r.difference, moved = r.float_left != null ? r.counted_cash - r.float_left : null;
       app.innerHTML = `<section class="panel narrowpanel"><h1>تم إغلاق الشيفت</h1><p>${esc(r.register_name || sh.register_name)}</p>
