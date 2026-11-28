@@ -106,7 +106,8 @@ def _archive_branch_ok(db: Database, ctx: Context) -> bool:
                " ORDER BY created_at DESC LIMIT 1", (ctx.org_id,))
     if r:
         return r["branch_id"] == ctx.branch_id
-    return db.one("SELECT count(*) n FROM branches WHERE org_id=?", (ctx.org_id,))["n"] <= 1
+    r = db.one("SELECT count(*) n, min(id) id FROM branches WHERE org_id=?", (ctx.org_id,))
+    return r["n"] == 1 and r["id"] == ctx.branch_id
 
 
 def _read_archive(db: Database, ctx: Context, a, cut: str | None, lo: str | None = None) -> dict:
