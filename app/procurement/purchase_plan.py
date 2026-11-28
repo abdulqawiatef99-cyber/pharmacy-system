@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
@@ -403,20 +404,31 @@ def plan(db: Database, ctx: Context, *, today: date | None = None, scope: str = 
         raise ValidationFailed("نطاق غير صحيح")
     from . import demand
     from .service import Procurement
+    clock = [time.perf_counter()]
+    tm: dict[str, int] = {}
+
+    def lap(name: str) -> None:                  # where the time goes, in ms (shown in the answer: "timings_ms")
+        now = time.perf_counter()
+        tm[name] = round((now - clock[0]) * 1000)
+        clock[0] = now
+
     p = Procurement(db, today=today)
     today = p.today
     o, b = ctx.org_id, ctx.branch_id
     m = demand.monthly(db, ctx, months=13, today=today)
+    lap("sales_history")
     months = m["months"][:-1]                           # the 12 complete months
     d = p._all_items(ctx, 1)                            # stock (expired apart) and draft invoices only
     sups = {r["id"]: dict(r) for r in db.all(
         "SELECT id, name, supplier_type, base_discount_local_bp, base_discount_imported_bp, is_active FROM suppliers"
         " WHERE org_id=?", (o,))}
+    lap("stock")
     items = db.all("SELECT i.id, i.code, i.name_en, i.name_ar, i.pack_size, i.public_price, i.is_imported, i.shortage_at,"
                    " coalesce(i.is_drug, 1) drug, c.mark FROM items i LEFT JOIN categories c ON c.id=i.category_id"
                    " WHERE i.org_id=? AND i.status='active' AND i.is_service=0", (o,))
     pack = {r["id"]: max(int(r["pack_size"] or 1), 1) for r in items}
     sent, arrived_t, ask = _tracked(db, ctx, today, pack)
+    lap("orders")
     see = ctx.can("costs.read")
     needed, counts = [], {"regular": 0, "semi": 0, "irregular": 0, "dead": 0, "hidden": 0}
     for it in items:
@@ -449,6 +461,7 @@ def plan(db: Database, ctx: Context, *, today: date | None = None, scope: str = 
         needed.append((it, pk, asked, units, cls, avg, expired, on_hand, arrived, on_order, qty, shown))
 
     last, per = _purchases(db, ctx, today, sups, {it["id"] for it, *_ in needed})
+    lap("purchases")
     rows = []
     for it, pk, asked, units, cls, avg, expired, on_hand, arrived, on_order, qty, shown in needed:
         iid = it["id"]
@@ -518,11 +531,12 @@ def plan(db: Database, ctx: Context, *, today: date | None = None, scope: str = 
               "pack_size": r["pack_size"]} for r in rows if r["unsure_raw"] is not None]
     used = sorted({(r["best"] or {}).get("supplier_id") for r in rows} - {None},  # empty without costs.read
                   key=lambda s: sups[s]["name"] if s in sups else "")
+    lap("rows")
     return {"rows": rows, "months": months, "periods": list(PERIODS), "period_default": PERIOD_DEFAULT,
             "counts": counts, "ask_about": ask_about, "check_names": check, "expensive_from": expensive_from,
             "suppliers": [{"id": s, "name": sups[s]["name"], "kind": sups[s]["supplier_type"]} for s in used],
             "all_suppliers": [{"id": k, "name": v["name"]} for k, v in sups.items() if v["is_active"]],
-            "shown_ids": len(ids), "estock_archive": bool(m.get("archive_from"))}
+            "shown_ids": len(ids), "estock_archive": bool(m.get("archive_from")), "timings_ms": tm}
 
 
 # ------------------------------------------------------------------ names, Excel, message

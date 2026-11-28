@@ -83,8 +83,9 @@ def _archive_months(db: Database, ctx: Context, cut: str | None, lo: str | None 
         return {}                                          # another pharmacy's archive: nothing (#345)
     if not _archive_branch_ok(db, ctx):
         return {}                                          # E-Stock's history belongs to the branch it moved into
-    ver = db.one("SELECT count(*) n, max(updated_at) u FROM items WHERE org_id=?", (ctx.org_id,))
-    key = (str(p), Path(p).stat().st_mtime, ctx.org_id, ctx.branch_id, cut, lo, ver["n"], ver["u"])
+    # What the read depends on is the items' ids and codes, not their prices: a price edit keeps the read.
+    sig = hash(tuple((r["id"], r["code"]) for r in db.all("SELECT id, code FROM items WHERE org_id=? ORDER BY id", (ctx.org_id,))))
+    key = (str(p), Path(p).stat().st_mtime, ctx.org_id, ctx.branch_id, cut, lo, sig)
     with _lock:
         if key in _cache:
             return _cache[key]
