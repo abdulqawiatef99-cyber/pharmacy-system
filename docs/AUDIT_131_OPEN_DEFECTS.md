@@ -1,7 +1,7 @@
 # #131 audit: reproductions of the defects still open
 
 These tests come from the money-and-stock audit (#131). Each one fails on `develop` until its issue is fixed.
-They are kept here, not in the suite with `expectedFailure`, so no failure is suppressed (AGENTS.md §4, Codex P1
+They are kept here, not in the suite with `expectedFailure`, so no failure is suppressed (AGENTS.md, Codex P1
 on #147). A fix PR copies its test into `tests/test_audit_money_stock.py` (the class named below, base `AuditCase`
 there), shows it failing before the fix and passing after, and deletes its section here.
 

@@ -221,7 +221,7 @@ class TestClock(unittest.TestCase):
 
 
 class TestNotWiredYet(unittest.TestCase):
-    """This batch must not change what the program does (launch freeze). When the licence is wired
+    """This batch must not change what the program does (not wired yet). When the licence is wired
     into the launcher and the screens, this test is the one to change, on purpose."""
 
     def test_nothing_the_program_runs_imports_licensing_or_the_envelope(self):

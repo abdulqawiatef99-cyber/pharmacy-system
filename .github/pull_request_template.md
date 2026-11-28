@@ -8,6 +8,6 @@ Closes #
 
 ## Risk
 - Money / stock / permissions / migrations / requirements touched? (say which, or "none")
-- Real pharmacy data or `main` touched? Must be "no" (`AGENTS.md` §2, §5).
+- Real pharmacy data or `main` touched? Must be "no".
 
-After opening: comment `@codex review` (`AGENTS.md` §2a).
+After opening: comment `@codex review`.

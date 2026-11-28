@@ -416,7 +416,7 @@ class TestTool(Base):
 
 class TestNotWiredYet(unittest.TestCase):
     def test_the_updater_and_the_bootstrap_do_not_ask_for_a_signature_yet(self):
-        """Launch freeze: this batch changes nothing the program does. Wiring changes this test on purpose."""
+        """Not wired yet: this batch changes nothing the program does. Wiring changes this test on purpose."""
         program = [p for p in ROOT.glob("app/**/*.py") if p.name != "release_signature.py"]
         program += [ROOT / "manage.py", ROOT / "launcher.py", ROOT / "release_bootstrap.py"]
         for p in program:
