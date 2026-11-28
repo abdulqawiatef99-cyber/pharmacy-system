@@ -313,10 +313,10 @@ def add_user(db: Database, ctx: Context, *, username: str, full_name: str, passw
 
 # -------------------------------------------------------------------------- screen preferences
 PREF_DEFAULTS = {"theme": "light", "accent": None, "font": "m", "lang": "ar", "names": "both", "help": "on",
-                 "logout_confirm": "on"}
+                 "logout_confirm": "on", "density": "compact"}
 _PREF_CHOICES = {"theme": ("light", "dark", "contrast"), "font": ("s", "m", "l", "xl"),
                  "lang": ("ar", "en"), "names": ("both", "en", "ar"), "help": ("on", "off"),
-                 "logout_confirm": ("on", "off")}
+                 "logout_confirm": ("on", "off"), "density": ("compact", "comfortable")}
 
 
 def _luminance(hex6: str) -> float:
@@ -341,7 +341,7 @@ def get_prefs(db: Database, user_id: str) -> dict:
 
 
 def set_prefs(db: Database, ctx: Context, changes: dict) -> dict:
-    """Each person's own screen: colors, font size, language, item names. Defaults are the
+    """Each person's own screen: colors, font size, row density, language, item names. Defaults are the
     recommended setup; 'reset' brings them back."""
     if changes.get("reset"):
         new = dict(PREF_DEFAULTS)

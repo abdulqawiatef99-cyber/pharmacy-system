@@ -1,6 +1,16 @@
 // English screen text: Arabic phrase -> English. Generated from the Arabic in app.js/index.html;
 // anything missing simply stays Arabic. Loaded only when a person chooses English.
 window.I18N_EN = {
+"أصناف فاتورة البيع": "Sale invoice items",
+"أصناف فاتورة الشراء": "Purchase invoice items",
+"المظهر واللغة": "Appearance and language",
+"صنف أو باركود": "Item or barcode",
+"كثافة الصفوف": "Row density",
+"مريح": "Comfortable",
+"مضغوط": "Compact",
+"روابط البيع": "Sale links",
+"البيع السريع": "Quick sale",
+"تفاصيل الفاتورة": "Invoice details",
 "قواعد رد المدفوعات": "Refund rules",
 "حسب الأولوية": "By priority",
 "ترتيب رد وسائل الدفع": "Refund tender order",

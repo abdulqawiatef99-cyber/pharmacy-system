@@ -20,7 +20,11 @@ const { chromium } = require('playwright');
   await p.setViewportSize({ width: 1366, height: 768 });
   await p.goto(base + '/#/pos');
   await p.waitForSelector('#posQuick .qbtn');
-  out.order = await p.evaluate(() => [...document.querySelector('.pos-main').children].map((e) => e.id || e.tagName));
+  out.order = await p.evaluate(() => [...document.querySelectorAll('.pos-main #posRes, .pos-main #posCart, .pos-main #posQuick')].map((e) => e.id));
+  out.positions = await p.evaluate(() => {
+    const [search, cart, quick] = ['#posQ', '#posCart', '#posQuick'].map((selector) => document.querySelector(selector).getBoundingClientRect());
+    return { cartUnderSearch: cart.top >= search.bottom, quickUnderCart: quick.top >= cart.bottom };
+  });
   out.rowTops = await p.evaluate(() => new Set([...document.querySelectorAll('#posQuick .qbtn')].map((b) => b.offsetTop)).size);
   await p.locator('#posQ').focus();
   await p.keyboard.type(code, { delay: 2 }); await p.keyboard.press('Enter');
@@ -83,7 +87,8 @@ class TestSaleLayout(APICase):
         out = run_node(self, SCRIPT, "owner", OWNER_PW, "6221043010373")
         order = out["order"]
         self.assertLess(order.index("posCart"), order.index("posQuick"))
-        self.assertEqual(order[order.index("posRes") + 1], "posCart")     # lines directly under the search results
+        self.assertEqual(order[order.index("posRes") + 1], "posCart")     # lines directly after the search results
+        self.assertTrue(out["positions"]["cartUnderSearch"] and out["positions"]["quickUnderCart"], out)
         self.assertEqual(out["rowTops"], 1)                                # one sideways row
         self.assertIn("افتح", out["shrunkLabel"])
         self.assertGreater(out["reopened"], 0)

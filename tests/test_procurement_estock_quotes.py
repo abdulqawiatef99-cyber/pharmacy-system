@@ -1,0 +1,228 @@
+"""Purchase-plan quotes and latency against synthetic E-Stock archives."""
+import sqlite3
+from contextlib import closing
+from dataclasses import replace
+from datetime import date, timedelta
+from time import perf_counter
+
+from app.catalog import card
+from app.catalog import service as cat
+from app.dataimport.estock_archive import NAME
+from app.dataimport.estock_synthetic import FULL
+from app.procurement import demand
+from tests.test_api import APICase, H
+from tests.test_u4_purchase_plan import TODAY, PlanBase
+
+
+def archive(path, org_id):
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE map_items (estock_id TEXT PRIMARY KEY, program_id TEXT NOT NULL);
+        CREATE TABLE map_suppliers (estock_id TEXT PRIMARY KEY, program_id TEXT NOT NULL);
+        CREATE TABLE e_Vendor (vendor_id TEXT, vendor_name_ar TEXT);
+        CREATE TABLE e_Products (product_id TEXT, product_code TEXT, sell_price TEXT);
+        CREATE TABLE e_Purchase_header (purchase_id TEXT, vendor_id TEXT, bill_date TEXT, insert_date TEXT);
+        CREATE TABLE e_Purchase_details (
+            details_id TEXT, purchase_id TEXT, product_id TEXT, amount TEXT, bouns TEXT, sell_price TEXT, buy_price TEXT
+        );
+        CREATE INDEX purchase_at ON e_Purchase_header(insert_date);
+        CREATE INDEX purchase_id ON e_Purchase_header(purchase_id);
+        CREATE INDEX purchase_lines ON e_Purchase_details(purchase_id);
+        CREATE INDEX purchase_product ON e_Purchase_details(product_id);
+        CREATE TABLE e_Sales_header (sales_id TEXT, insert_date TEXT);
+        CREATE TABLE e_Sales_details (sales_id TEXT, product_id TEXT, amount TEXT, back_amount TEXT);
+        CREATE INDEX sale_at ON e_Sales_header(insert_date);
+        CREATE INDEX sale_lines ON e_Sales_details(sales_id);
+    """)
+    con.execute("INSERT INTO meta VALUES ('org_id', ?)", (org_id,))
+    return con
+
+
+class TestArchiveQuotes(PlanBase):
+    def setUp(self):
+        super().setUp()
+        self.it = self.item("Synthetic Order Item", public_price=11000, pack_size=4)
+        card.set_shortage(self.db, self.ctx, self.it, True)
+        self.ibn = cat.create_supplier(self.db, self.ctx, name="ابن سينا")
+        self.path = self.tmp / NAME
+        with closing(archive(self.path, self.ctx.org_id)) as con, con:
+            con.execute("INSERT INTO map_items VALUES ('901', ?)", (self.it,))
+            con.execute("INSERT INTO map_suppliers VALUES ('84', ?)", (self.ibn,))
+            con.execute("INSERT INTO e_Vendor VALUES ('84', 'ابن سينا'), ('85', 'مورد تجريبي قديم')")
+            con.execute("INSERT INTO e_Products VALUES ('901', 'E-901', '100.00')")
+
+    def old_buy(self, inv, *, days_ago=4, entered_days_ago=None, vendor="84", price="100.00",
+                net="85.00", qty="10", bonus="2"):
+        at = (TODAY - timedelta(days=days_ago)).isoformat() + " 18:00:00"
+        entered = at if entered_days_ago is None else (TODAY - timedelta(days=entered_days_ago)).isoformat()
+        with closing(sqlite3.connect(self.path)) as con, con:
+            con.execute("INSERT INTO e_Purchase_header VALUES (?, ?, ?, ?)", (inv, vendor, at, entered))
+            con.execute("INSERT INTO e_Purchase_details VALUES (?, ?, '901', ?, ?, ?, ?)",
+                        (inv, inv, qty, bonus, price, net))
+
+    def test_ibn_sina_archive_only_has_real_discount(self):
+        self.old_buy("1")
+        before = self.path.read_bytes()
+        out = self.plan()
+        row = out["rows"][0]
+        self.assertIsNotNone(row["best"])
+        self.assertEqual((row["best"]["supplier_id"], row["best"]["supplier"]), (self.ibn, "ابن سينا"))
+        self.assertEqual(row["best"]["discount_bp"], 2917)
+        self.assertEqual((row["best"]["bonus"], row["best"]["unit_net_price"]), (2, 8500))
+        self.assertEqual(out["ask_about"], [])
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_discount_is_computed_from_exact_prices_not_piaster_rounded(self):
+        """Codex review on #509: 0.8549 and 0.8510 against a list price of 1.0000 are 14.51% and 14.90%, not both
+        15.00%; rounding the prices to piasters first made the cheaper supplier look equal or worse."""
+        other = cat.create_supplier(self.db, self.ctx, name="مورد تجريبي ثاني")
+        with closing(sqlite3.connect(self.path)) as con, con:
+            con.execute("INSERT INTO map_suppliers VALUES ('85', ?)", (other,))
+        self.old_buy("1", vendor="84", price="1.0000", net="0.8549", qty="10", bonus="0")
+        self.old_buy("2", vendor="85", price="1.0000", net="0.8510", qty="10", bonus="0", days_ago=5)
+        row = self.rows()[self.it]
+        found = {r["supplier_id"]: r["discount_bp"] for r in row["suppliers"]}
+        self.assertEqual(found[self.ibn], 1451)
+        self.assertEqual(found[other], 1490)
+        self.assertEqual((row["best"]["supplier_id"], row["best"]["discount_bp"]), (other, 1490))
+
+    def test_discount_rounds_half_up_once_at_the_end(self):
+        self.old_buy("1", price="1.0000", net="0.85005", qty="10", bonus="0")  # paid 8500.5bp -> 8501
+        self.assertEqual(self.rows()[self.it]["best"]["discount_bp"], 1499)
+
+    def test_list_price_under_half_a_piaster_has_no_discount(self):
+        self.old_buy("1", price="0.004", net="0.003", qty="10", bonus="0")
+        row = self.rows()[self.it]
+        self.assertTrue(all(s["discount_bp"] is None for s in row["suppliers"]))
+
+    def test_invoice_day_latest_across_sources_and_live_wins_a_tie(self):
+        self.old_buy("1", days_ago=7, entered_days_ago=1, net="70")
+        self.old_buy("2", days_ago=4, entered_days_ago=3, net="85")
+        live = self.buy(self.it, self.ibn, days_ago=4, public=10000, net=9000)
+        with self.db.transaction():
+            self.db.execute("UPDATE purchase_invoices SET approved_at=? WHERE id=?",
+                            (TODAY.isoformat() + "T12:00:00.000Z", live))
+        best = self.rows()[self.it]["best"]
+        self.assertEqual(best["discount_bp"], 1000)
+        self.assertEqual(best["prev_bp"], 2917)
+        self.old_buy("3", days_ago=2, net="75")
+        best = self.rows()[self.it]["best"]
+        self.assertEqual(best["discount_bp"], 3750)
+        self.assertEqual(best["prev_bp"], 1000)
+
+    def test_unmapped_supplier_listed_and_cannot_be_recommended(self):
+        self.old_buy("1", vendor="85", net="60")
+        row = self.rows()[self.it]
+        self.assertIsNone(row["best"])
+        self.assertEqual([(s["supplier_id"], s["supplier"], s["estock_supplier_id"]) for s in row["suppliers"]],
+                         [(None, "مورد تجريبي قديم", "85")])
+
+    def test_archive_prices_are_hidden_without_permission(self):
+        self.old_buy("1")
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"costs.read"})
+        row = self.plan(ctx=staff)["rows"][0]
+        self.assertIsNone(row["best"])
+        self.assertEqual(row["suppliers"][0]["supplier"], "ابن سينا")
+        for key in ("discount_bp", "prev_bp", "unit_net_price", "bonus"):
+            self.assertIsNone(row["suppliers"][0][key])
+            self.assertNotIn(key, row["last"])
+
+    def test_redacted_quotes_with_the_same_name_do_not_reveal_discount_order(self):
+        with closing(sqlite3.connect(self.path)) as con, con:
+            con.execute("INSERT INTO e_Vendor SELECT '86', vendor_name_ar FROM e_Vendor WHERE vendor_id='85'")
+        self.old_buy("1", vendor="85", net="90")
+        self.old_buy("2", vendor="86", net="60")
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"costs.read"})
+        quotes = self.plan(ctx=staff)["rows"][0]["suppliers"]
+        self.assertEqual([s["estock_supplier_id"] for s in quotes], ["85", "86"])
+
+    def test_redacted_match_warnings_do_not_reveal_the_cheapest_supplier(self):
+        self.buy(self.it, self.s1, days_ago=10, public=10000, net=8000, raw="Check me", match="suggested")
+        self.old_buy("1", net="95", bonus="0")
+        staff = replace(self.ctx, permissions=self.ctx.permissions - {"costs.read"})
+        before = self.plan(ctx=staff)
+        self.old_buy("2", days_ago=3, net="60", bonus="0")
+        after = self.plan(ctx=staff)
+        self.assertEqual(before["check_names"], after["check_names"])
+        self.assertEqual(before["rows"][0]["flags"], after["rows"][0]["flags"])
+
+    def test_archive_is_limited_to_its_org_branch_and_purchase_window(self):
+        self.old_buy("1", days_ago=366)
+        self.old_buy("2", days_ago=-1)
+        self.assertEqual(self.rows()[self.it]["suppliers"], [])
+        self.old_buy("3", days_ago=10, price=None, qty="2.50", bonus="0.50", net="90.0000")
+        with closing(sqlite3.connect(self.path)) as con, con:
+            con.execute("UPDATE e_Purchase_details SET product_id=' 901.0 ' WHERE details_id='3'")
+        self.assertEqual(self.rows()[self.it]["best"]["discount_bp"], 2500)
+        self.assertEqual(self.plan(ctx=replace(self.ctx, branch_id="other"))["rows"][0]["suppliers"], [])
+        with closing(sqlite3.connect(self.path)) as con, con:
+            con.execute("UPDATE meta SET value='other' WHERE key='org_id'")
+        self.assertEqual(self.rows()[self.it]["suppliers"], [])
+
+
+class TestPlanAtArchiveScale(APICase):
+    def test_first_get_with_30k_items_and_full_archive(self):
+        self.http_login()
+        supplier = cat.create_supplier(self.db, self.ctx, name="ابن سينا")
+        today = date.today()
+        with self.db.transaction():
+            self.db.execute("""
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?)
+                INSERT INTO items (id, org_id, name_en, name_norm, dedupe_key, public_price, pack_size)
+                SELECT 'scale-'||x, ?, 'Synthetic '||x, 'synthetic '||x, 'scale-'||x, 10000, 4 FROM n
+            """, (FULL["items"], self.ctx.org_id))
+            self.db.execute("""
+                INSERT INTO stock_balances (org_id, branch_id, item_id, batch_key, qty)
+                SELECT org_id, ?, id, '', 8 FROM items
+                WHERE org_id=? AND (id NOT LIKE 'scale-%' OR CAST(substr(id,7) AS INTEGER)>420)
+            """, (self.ctx.branch_id, self.ctx.org_id))
+
+            # A live overlay also exercises the approved-invoice lookup at scale.
+            self.db.execute("""
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
+                INSERT INTO purchase_invoices (
+                    id, org_id, branch_id, supplier_id, invoice_date, status, source_type, approved_at, created_at
+                )
+                SELECT 'live-'||x, ?, ?, ?, ?, 'approved', 'manual', ?, ? FROM n
+            """, (self.ctx.org_id, self.ctx.branch_id, supplier, today.isoformat(), today.isoformat(), today.isoformat()))
+            self.db.execute("""
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<12000)
+                INSERT INTO purchase_invoice_lines (
+                    id, invoice_id, org_id, line_no, raw_name, item_id, qty, bonus_qty, public_price, unit_net_price
+                )
+                SELECT 'live-line-'||x, 'live-'||(1 + (x-1)/12), ?, 1 + (x-1)%12, 'Synthetic', 'scale-'||(x+420), 10, 0, 10000, 8500
+                FROM n
+            """, (self.ctx.org_id,))
+        month = today.replace(day=1)
+        months = []
+        for _ in range(12):
+            month = (month - timedelta(days=1)).replace(day=1)
+            months.append(month.isoformat() + " 14:00:00")
+        with closing(archive(self.tmp / NAME, self.ctx.org_id)) as con, con:
+            con.executemany("INSERT INTO map_items VALUES (?,?)",
+                            ((str(i), f"scale-{i}") for i in range(1, FULL["items"] + 1)))
+            con.executemany("INSERT INTO e_Products VALUES (?,?,'100.00')",
+                            ((str(i), f"E-{i}") for i in range(1, FULL["items"] + 1)))
+            con.execute("INSERT INTO map_suppliers VALUES ('84',?)", (supplier,))
+            con.executemany("INSERT INTO e_Sales_header VALUES (?,?)",
+                            ((i, months[(i - 1) // 420 % 12]) for i in range(1, FULL["sales"] + 1)))
+            con.executemany("INSERT INTO e_Sales_details VALUES (?,?,?,?)",
+                            ((1 + i % FULL["sales"], 1 + i % 420 if i < 5040 else 421 + i % 29580,
+                              "2.50", "0.50") for i in range(FULL["sale_lines"])))
+            con.executemany("INSERT INTO e_Purchase_header VALUES (?,'84',?,?)",
+                            ((i, months[i // 100 % 12], months[i // 100 % 12]) for i in range(1, FULL["purchases"] + 1)))
+            con.executemany("INSERT INTO e_Purchase_details VALUES (?,?,?,'10','2','100.00','85.00')",
+                            ((i, 1 + i % FULL["purchases"], 1 + i % 420 if i < 8400 else 421 + i % 29580)
+                             for i in range(FULL["purchase_lines"])))
+        demand._cache.clear()
+        started = perf_counter()
+        response = self.c.get("/api/procurement/plan", headers=H)
+        elapsed = perf_counter() - started
+        print(f"GET /api/procurement/plan, first request at archive scale: {elapsed:.3f}s")
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        rows = response.json()["rows"]
+        self.assertEqual(len(rows), 420)
+        missing = [row["item_id"] for row in rows if (row["best"] or {}).get("discount_bp") != 2917]
+        self.assertFalse(missing, f"{len(missing)} missing quotes: {missing[:10]}")
+        self.assertLess(elapsed, 5.0, "first request with a full archive exceeded the CI timing budget")
