@@ -3173,83 +3173,24 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
 
     @handler
     async def shift_report_page(req):
-        """Closing report sized for the 80mm receipt printer (browser print)."""
-        from ..sales.cash import DENOMINATIONS
+        """Closing report sized for the 80 / 58 mm receipt printer (browser print; #97 layout)."""
+        from ..printing import settings as rs, shift_report
         ctx = ctx_of(req)
         r = CashDrawer(db).report(ctx, req.path_params["id"])
         org = db.one("SELECT name FROM organizations WHERE id=?", (ctx.org_id,))["name"]
-        e = _html.escape
-        m = lambda p: f"{(p or 0) / 100:,.2f}"  # noqa: E731
-        from ..printing import settings as rs
-        tf = rs.get(db, ctx.org_id)["time_format"]                                                        # #206
-        t = lambda iso: rs.fmt_when(accounts.parse_iso(iso).astimezone(), tf) if iso else "—"  # noqa: E731
-        k = r["cash_by_kind"]
-        rows = [("رصيد البداية", r["opening_cash"]), ("مبيعات نقدي", k.get("sale", 0)),
-                ("تحصيل من العملاء (آجل وباقي اتساب رصيد)", k.get("customer_payment", 0)), ("مرتجع نقدي", k.get("refund", 0)),
-                ("إلغاء فواتير", k.get("void", 0)), ("مصروفات من الخزينة", k.get("payout", 0)), ("إيداع", k.get("deposit", 0)),
-                ("منها تقريب النقدي (مش مبيعات)", r.get("rounding_total", 0))]
-        cash_rows = "".join(f"<tr><td>{a}</td><td>{m(v)}</td></tr>" for a, v in rows if v or a == "رصيد البداية")
-        ch_rows = "".join(
-            f"<tr><td>{'بطاقة' if c['method'] == 'card' else 'تحويل'} — {e(c['channel'])}</td>"
-            f"<td>{m(c['amount'] - c.get('refunded', 0))}</td></tr>"
-            + (f"<tr><td>مرتجع على نفس المحفظة</td><td>{m(c['refunded'])}</td></tr>" if c.get("refunded") else "")
-            for c in r["by_channel"])
+        cfg = rs.get(db, ctx.org_id)
+        paper = 58 if cfg["paper"] == 58 else 80
+        css = f'<link rel="stylesheet" href="{_static_v("receipt.css")}">' + (
+            f'<link rel="stylesheet" href="{_static_v("receipt-58.css")}">' if paper == 58 else "")
+        return Response(shift_report.page(org, r, paper, css, cfg["time_format"]), media_type="text/html; charset=utf-8")
 
-        den = r["counted_detail"] or {}
-        den_rows = "".join(f"<tr><td>{d / 100:g} × {den[str(d)]}</td><td>{m(d * den[str(d)])}</td></tr>"
-                           for d in DENOMINATIONS if den.get(str(d)))
-        diff = r["difference"]
-        res = ("" if r["status"] != "closed" else
-               f"<tr class='t'><td>{'✓ مطابق' if not diff else ('✕ عجز' if diff < 0 else '⚠ زيادة')}</td><td>{m(abs(diff or 0))}</td></tr>")
-        # #81: drawer-open commands (the printer cannot confirm the drawer physically opened)
-        drawer = "".join(f"<tr><td><small>{t(d['at'])} {e(d.get('by') or '')} — {e(d.get('reason') or '')}"
-                         f"{(' : ' + e(d['note'])) if d.get('note') else ''}{' (فشل)' if d.get('outcome') == 'failed' else ''}</small></td><td></td></tr>"
-                         for d in r["drawer_manual"])
-        drawer = (f"<hr><table><tr><td>فتح الدرج مع البيع النقدي</td><td>{r['drawer_auto_count']}</td></tr>"
-                  f"<tr><td>فتح الدرج من غير بيع</td><td>{r['drawer_manual_count']}</td></tr>{drawer}</table>")
-        # U2-28: duration, credit sales by customer, discounts by seller, notes kept / moved, signatures
-        dur = ""
-        if r.get("closed_at"):
-            mins = int((accounts.parse_iso(r["closed_at"]) - accounts.parse_iso(r["opened_at"])).total_seconds() // 60)
-            dur = f"<br>مدة الشيفت: {mins // 60} ساعة و{mins % 60} دقيقة"
-        credit_rows = "".join(f"<tr><td>آجل فاتورة {c['sale_no']} — {e(c['customer'] or 'بدون اسم')}</td><td>{m(c['on_credit'])}</td></tr>"
-                              for c in r.get("credit_sales") or [])
-        disc_rows = "".join(f"<tr><td>خصم {e(d['name'] or '')} ({d['n']} فاتورة)</td><td>{m(d['total'])}</td></tr>"
-                            for d in r.get("discount_by_user") or [])
-        sp = r.get("float_split") or {}
-        keep_rows = "".join(f"<tr><td>{int(d) / 100:g} × {n}</td><td>{m(int(d) * n)}</td></tr>"
-                            for d, n in sorted((sp.get("keep") or {}).items(), key=lambda kv: -int(kv[0])))
-        fl = r.get("float_left")
-        kept = ""
-        if r["status"] == "closed" and fl is not None:
-            kept = (f"<hr><table><tr class='t'><td>الفكة اللي فضلت في الدرج</td><td>{m(fl)}</td></tr>{keep_rows}"
-                    f"<tr class='t'><td>اتحوّل للخزنة</td><td>{m((r['counted_cash'] or 0) - fl)}</td></tr></table>")
-        hint = ""
-        if r["status"] == "closed" and diff:
-            hint = "<p><small>دوّر على سبب الفرق من شاشة الشيفت ← «دوّر على الفرق» (قروش الفواتير، فتح الدرج، المرتجعات).</small></p>"
-        page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>إغلاق الشيفت</title>
-<link rel="stylesheet" href="{_static_v('receipt.css')}"></head><body>
-<div class="r"><h1>{e(org)}</h1><p>تقرير إغلاق الشيفت — {e(r['register_name'])}<br>من {t(r['opened_at'])} ({e(r['opened_by_name'] or '')})<br>
-إلى {t(r['closed_at'])} ({e(r['closed_by_name'] or '')}){dur}</p>
-<table><tr><td>عدد الفواتير</td><td>{r['sales_count']}</td></tr><tr><td>إجمالي المبيعات</td><td>{m(r['sales_total'])}</td></tr>
-{f"<tr><td>الخصومات</td><td>{m(r['discount_total'])}</td></tr>" if r['discount_total'] else ""}
-{f"<tr><td>مرتجعات ({r['returns_count']})</td><td>{m(r['returns_total'])}</td></tr>" if r['returns_count'] else ""}
-{f"<tr><td>منها مرتجع على البطاقة</td><td>{m(r['card_refunds'])}</td></tr>" if r['card_refunds'] else ""}
-{f"<tr><td>منها مرتجع للمحفظة</td><td>{m(r['transfer_refunds'])}</td></tr>" if r['transfer_refunds'] else ""}
-{f"<tr><td>منها مرتجع على حساب العميل</td><td>{m(r['credit_refunds'])}</td></tr>" if r['credit_refunds'] else ""}
-{f"<tr><td>فواتير ملغاة</td><td>{r['voided_count']}</td></tr>" if r['voided_count'] else ""}</table><hr>
-<table>{cash_rows}<tr class="t"><td>المتوقع في الخزينة</td><td>{m(r['expected_cash'])}</td></tr></table>
-{f"<hr><table>{den_rows}</table>" if den_rows else ""}
-<table><tr class="t"><td>المعدود</td><td>{m(r['counted_cash'])}</td></tr>{res}</table>
-{f"<hr><table>{ch_rows}</table>" if ch_rows else ""}
-{f"<table><tr><td>آجل</td><td>{m(r['credit_total'])}</td></tr>{credit_rows}</table>" if r['credit_total'] else ""}
-{f"<hr><table>{disc_rows}</table>" if disc_rows else ""}
-{kept}{hint}
-{f"<p>ملاحظة: {e(r['close_note'])}</p>" if r.get('close_note') else ""}
-{drawer}
-<p class="f">توقيع الكاشير: ..................</p><p class="f">توقيع المستلم: ..................</p></div><script src="/static/print.js"></script></body></html>"""
-        return Response(page, media_type="text/html; charset=utf-8")
+    @handler
+    async def print_shift_report(req):
+        """#97: the closing report straight to the receipt printer; the screen falls back to the page."""
+        from ..printing import shift_report
+        ctx = ctx_of(req)
+        await body(req)
+        return J(await run_in_threadpool(shift_report.print_report, db, ctx, req.path_params["id"]))
 
     @handler
     async def print_receipt(req):
@@ -3879,6 +3820,7 @@ def create_app(db: Database | None = None, settings: config_mod.Settings | None 
         Route("/api/settings/receipt/logo", receipt_logo),
         Route("/api/print/receipt/{id}", print_receipt, methods=["POST"]),
         Route("/api/print/drawer", print_drawer, methods=["POST"]),
+        Route("/api/print/shift-report/{id}", print_shift_report, methods=["POST"]),
         Route("/api/print/printers", print_printers),
         Route("/api/print/test", print_test, methods=["POST"]),
         Route("/api/print/labels", print_labels_api, methods=["POST"]),

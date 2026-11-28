@@ -7003,16 +7003,29 @@ async function viewShift(opts = {}) {
         <p class="result ${!d ? "b-ok" : d < 0 ? "b-err" : "b-warn"}">${!d ? "✓ الخزينة مطابقة" : d < 0 ? `✕ عجز ${money(-d)} ج` : `⚠ زيادة ${money(d)} ج`}</p>
         <div class="totals"><div>المتوقع<b>${money(r.expected_cash)}</b></div><div>المعدود<b>${money(r.counted_cash)}</b></div>
           ${moved != null ? `<div>اتحوّل من الدرج<b>${money(moved)}</b></div><div>الفكة للشيفت الجاي<b>${money(r.float_left)}</b></div>` : ""}</div>
-        <div class="row mt"><a class="btn" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><button type="button" class="btn secondary" id="shNew">افتح شيفت جديدًا</button></div></section>`;
+        <div class="row mt"><a class="btn" id="shPrint" href="/shift-report/${esc(r.id)}" target="_blank">اطبع التقرير</a><button type="button" class="btn secondary" id="shNew">افتح شيفت جديدًا</button></div></section>`;
       // U2-26: the link pointed at this same screen and did nothing; open the new-shift form with the kept float
       $("#shNew").addEventListener("click", () => viewShift(opts.shift ? {} : { float: r.float_left ?? undefined }));
-      printInFrame(`/shift-report/${r.id}`);
+      $("#shPrint").addEventListener("click", (ev) => { ev.preventDefault(); printShiftReport(r.id); });
+      printShiftReport(r.id);
     } catch (err) {
       toast(err.code === "difference_note_required" ? `${err.message} (الفرق ${money(err.details.difference)})` : err.message, true);
       if (err.code === "difference_note_required") e.target.note.focus();
     }
   });
 }
+
+// ------------------------------------------------------------------ #97 shift-close report printing
+// Straight to the receipt printer when direct printing is set; the browser page stays the fallback
+// (browser printing chosen, or the printer did not take it).
+async function printShiftReport(id) {
+  try { await api(`/api/print/shift-report/${id}`, { method: "POST", body: {} }); toast("✓ أُرسل تقرير الشيفت للطابعة"); }
+  catch (err) {
+    if (err.code !== "no_printer") toast(err.message, true);
+    printInFrame(`/shift-report/${id}`);
+  }
+}
+// ------------------------------------------------------------------ end #97
 
 // ------------------------------------------------------------------ money accounts (F105): where the money is
 let MONEY = null;                                   // {accounts, kinds, movement_kinds}, read once per screen

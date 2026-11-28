@@ -32,6 +32,14 @@ body.w58 .hd.one img { max-width: 36mm; }
 .chg td { font-weight: bold; font-size: 14px; }
 .hd figure.qr { margin: 0; text-align: center; flex: none; }
 .hd figcaption { font-size: 10px; font-weight: bold; margin-top: 1px; }
+/* #97 shift-close report: denomination table الفئة | العدد | المبلغ */
+table.den { margin: 2px 0; }
+table.den th { font-weight: bold; border-bottom: 1px dashed #000; padding: 2px 0; text-align: right; }
+table.den th:nth-child(2), table.den td:nth-child(2) { width: 12mm; text-align: center; direction: ltr; }
+table.den th:last-child { width: 23mm; text-align: left; }
+body.w58 table.den th:nth-child(2), body.w58 table.den td:nth-child(2) { width: 9mm; }
+body.w58 table.den th:last-child { width: 17mm; }
+
 /* UX-26 (owner 26/11): the customer's name, phone and address bold and larger */
 b.cu { font-size: 14px; }
 body.w58 b.cu { font-size: 12px; }
