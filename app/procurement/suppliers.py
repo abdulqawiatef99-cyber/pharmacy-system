@@ -258,7 +258,7 @@ def shortages(db: Database, ctx: Context, today: date | None = None) -> list[dic
         " sold AS (SELECT l.item_id, sum(l.qty_base) q FROM sale_lines l JOIN sales s ON s.id=l.sale_id"
         "  WHERE s.org_id=? AND s.status='completed' AND s.completed_at>=? GROUP BY l.item_id)"
         " SELECT i.id, i.name_en, i.name_ar, i.pack_size, i.base_unit_name, i.pack_unit_name, i.min_stock, i.max_stock,"
-        "  i.shortage_at, i.location, coalesce(st.q,0) stock, coalesce(sold.q,0) sold_60d,"
+        "  i.shortage_at, i.location, i.public_price, coalesce(st.q,0) stock, coalesce(sold.q,0) sold_60d,"
         "  (SELECT sp.name FROM purchase_invoice_lines pl JOIN purchase_invoices p ON p.id=pl.invoice_id JOIN suppliers sp"
         "   ON sp.id=p.supplier_id WHERE pl.item_id=i.id AND p.status='approved' ORDER BY p.approved_at DESC LIMIT 1) last_supplier"
         " FROM items i LEFT JOIN st ON st.item_id=i.id LEFT JOIN sold ON sold.item_id=i.id"
@@ -274,4 +274,27 @@ def shortages(db: Database, ctx: Context, today: date | None = None) -> list[dic
         target = d["max_stock"] or (d["min_stock"] * 2 if d["min_stock"] else d["sold_60d"] // 2)
         d["suggest_base"] = max(0, (target or 0) - max(0, d["stock"]))
         out.append(d)
+    _last_purchase(db, ctx, out, today)
     return out
+
+
+def _last_purchase(db: Database, ctx: Context, out: list[dict], today: date | None) -> None:
+    """Owner 28/11: next to the last supplier, what the item came at last time (discount and pharmacist price),
+    from the program's invoices and the moved E-Stock history alike. Costs only for who may read them."""
+    if not out:
+        return
+    from .purchase_plan import _purchases
+    sups = {r["id"]: dict(r) for r in db.all(
+        "SELECT id, name, supplier_type, is_active FROM suppliers WHERE org_id=?", (ctx.org_id,))}
+    try:
+        last, _ = _purchases(db, ctx, today or date.today(), sups, {d["id"] for d in out})
+    except Exception:                                   # never lose the shortages list over the history read
+        last = {}
+    see = ctx.can("costs.read")
+    for d in out:
+        rec = last.get(d["id"])
+        if rec and rec.get("supplier"):
+            d["last_supplier"] = rec["supplier"]
+        d["last_date"] = rec["date"] if rec else None
+        d["last_discount_bp"] = rec.get("discount_bp") if rec and see else None
+        d["last_net_price"] = rec.get("unit_net_price") if rec and see else None

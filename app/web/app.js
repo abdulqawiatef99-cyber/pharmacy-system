@@ -7924,20 +7924,23 @@ async function viewAudit() {
 
 // ------------------------------------------------------------------ shortages (النواقص)
 const SH_REASON = { marked: ["b-warn", "⚠ مسجل ناقصًا"], below_min: ["b-warn", "⚠ تحت حد الطلب"], sold_out: ["b-err", "✕ نفد وكان يُباع"] };
+const shPct = (bp) => `${(bp / 100).toFixed(2).replace(/\.?0+$/, "")}%`;
 async function viewShortages() {
   const items = (await api("/api/shortages")).items;
   const it = (r) => ({ pack_size: r.pack_size, base_unit_name: r.base_unit_name });
   app.innerHTML = `<section class="panel" id="shRep"><div class="row between"><h1>النواقص (${items.length})</h1>${reportTools("short")}</div>
     <p class="muted">أصناف سجّلها أحد ناقصة، أو وصلت إلى حد الطلب، أو نفدت وكانت تُباع في آخر 60 يومًا. تُزال العلامة تلقائيًا عند اعتماد فاتورة شراء الصنف.</p>
-    <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>السبب</th><th>الرصيد</th><th>حد الطلب</th><th>المبيع في 60 يومًا</th><th>المقترح</th><th>آخر مورد</th></tr></thead><tbody>
+    <div class="tablewrap"><table><thead><tr><th>الصنف</th><th>السبب</th><th>الرصيد</th><th>حد الطلب</th><th>المبيع في 60 يومًا</th><th>المقترح</th><th>سعر الجمهور</th><th>آخر مورد</th><th>خصم آخر مرة</th><th>سعر الصيدلي آخر مرة</th></tr></thead><tbody>
     ${items.map((r) => `<tr class="clickable" data-go="${esc(r.id)}"><td>${itemHtml(r)}</td><td>${r.reasons.map((x) => `<span class="badge ${SH_REASON[x][0]}">${SH_REASON[x][1]}</span>`).join(" ")}</td>
       <td>${esc(fmtStock(r.stock, it(r)) || "0")}</td><td>${r.min_stock ? esc(fmtStock(r.min_stock, it(r))) : "—"}</td><td>${esc(fmtStock(r.sold_60d, it(r)) || "0")}</td>
-      <td><b>${r.suggest_base ? esc(fmtStock(r.suggest_base, it(r))) : "—"}</b></td><td>${esc(r.last_supplier || "—")}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">✓ لا توجد نواقص</td></tr>`}</tbody></table></div></section>`;
+      <td><b>${r.suggest_base ? esc(fmtStock(r.suggest_base, it(r))) : "—"}</b></td><td>${r.public_price != null ? esc(money(r.public_price)) : "—"}</td><td>${esc(r.last_supplier || "—")}${r.last_date ? `<div class="muted small">${esc(r.last_date)}</div>` : ""}</td>
+      <td>${r.last_discount_bp != null ? esc(shPct(r.last_discount_bp)) : "—"}</td><td>${r.last_net_price != null ? esc(money(r.last_net_price)) : "—"}</td></tr>`).join("") || `<tr><td colspan="10" class="muted">✓ لا توجد نواقص</td></tr>`}</tbody></table></div></section>`;
   document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/items/${tr.dataset.go}`; }));
   wireTools("short", () => ({ title: "النواقص", subtitle: isoDay(new Date()), el: $("#shRep"), sheets: [
-    { name: "النواقص", columns: [Tx("الصنف"), Tx("السبب"), Tx("الرصيد"), Tx("حد الطلب"), Tx("المبيع في 60 يومًا"), Tx("المقترح"), N("المقترح بالوحدة"), Tx("آخر مورد")],
+    { name: "النواقص", columns: [Tx("الصنف"), Tx("السبب"), Tx("الرصيد"), Tx("حد الطلب"), Tx("المبيع في 60 يومًا"), Tx("المقترح"), N("المقترح بالوحدة"), N("سعر الجمهور"), Tx("آخر مورد"), Tx("تاريخ آخر شراء"), N("خصم آخر مرة %"), N("سعر الصيدلي آخر مرة")],
       rows: items.map((r) => [r.name_en || r.name_ar, r.reasons.map((x) => SH_REASON[x][1].replace(/^[⚠✕] /, "")).join("، "), fmtStock(r.stock, it(r)) || "0",
-        r.min_stock ? fmtStock(r.min_stock, it(r)) : "", fmtStock(r.sold_60d, it(r)) || "0", r.suggest_base ? fmtStock(r.suggest_base, it(r)) : "", r.suggest_base || "", r.last_supplier || ""]) }] }));
+        r.min_stock ? fmtStock(r.min_stock, it(r)) : "", fmtStock(r.sold_60d, it(r)) || "0", r.suggest_base ? fmtStock(r.suggest_base, it(r)) : "", r.suggest_base || "", r.public_price != null ? r.public_price / 100 : "", r.last_supplier || "", r.last_date || "",
+        r.last_discount_bp != null ? r.last_discount_bp / 100 : "", r.last_net_price != null ? r.last_net_price / 100 : ""]) }] }));
 }
 
 // ------------------------------------------------------------------ customers
