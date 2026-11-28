@@ -60,6 +60,22 @@ class TestSuppliers(Base):
         self.assertIsNone(card.card(self.db, self.ctx, self.pan)["shortage_at"])
         self.assertEqual(sup.shortages(self.db, self.ctx), [])                      # 20 + 40 units > 30
 
+    def test_shortages_show_public_price_and_last_purchase(self):
+        """Owner 28/11: public price, and next to the last supplier the discount and pharmacist price it came at."""
+        self.buy(packs=5, price=4000, disc=2500)
+        card.set_shortage(self.db, self.ctx, self.pan, True)
+        r = next(x for x in sup.shortages(self.db, self.ctx) if x["id"] == self.pan)
+        self.assertIsNotNone(r["public_price"])
+        self.assertEqual(r["last_supplier"], "مخزن النهضة")
+        self.assertEqual((r["last_discount_bp"], r["last_net_price"]), (2500, 3000))
+        self.assertTrue(r["last_date"])
+        people.add_user(self.db, self.ctx, username="pharm2", full_name="P", password=PW, role_code="pharmacist")
+        ph = self.login("pharm2", PW)
+        if ph.can("inventory.read"):
+            r = next(x for x in sup.shortages(self.db, ph) if x["id"] == self.pan)
+            self.assertEqual((r["last_discount_bp"], r["last_net_price"]), (None, None))   # costs stay hidden
+            self.assertEqual(r["last_supplier"], "مخزن النهضة")
+
 
 class TestStatement(TestSuppliers):
     def test_period_statement_and_all_suppliers(self):
