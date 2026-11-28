@@ -293,8 +293,8 @@ def _last_purchase(db: Database, ctx: Context, out: list[dict], today: date | No
     see = ctx.can("costs.read")
     for d in out:
         rec = last.get(d["id"])
-        if rec and rec.get("supplier"):
-            d["last_supplier"] = rec["supplier"]
+        if rec:
+            d["last_supplier"] = rec.get("supplier")
         d["last_date"] = rec["date"] if rec else None
         d["last_discount_bp"] = rec.get("discount_bp") if rec and see else None
         d["last_net_price"] = rec.get("unit_net_price") if rec and see else None

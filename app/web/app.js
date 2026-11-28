@@ -7937,10 +7937,10 @@ async function viewShortages() {
       <td>${r.last_discount_bp != null ? esc(shPct(r.last_discount_bp)) : "—"}</td><td>${r.last_net_price != null ? esc(money(r.last_net_price)) : "—"}</td></tr>`).join("") || `<tr><td colspan="10" class="muted">✓ لا توجد نواقص</td></tr>`}</tbody></table></div></section>`;
   document.querySelectorAll("[data-go]").forEach((tr) => tr.addEventListener("click", () => { location.hash = `#/items/${tr.dataset.go}`; }));
   wireTools("short", () => ({ title: "النواقص", subtitle: isoDay(new Date()), el: $("#shRep"), sheets: [
-    { name: "النواقص", columns: [Tx("الصنف"), Tx("السبب"), Tx("الرصيد"), Tx("حد الطلب"), Tx("المبيع في 60 يومًا"), Tx("المقترح"), N("المقترح بالوحدة"), N("سعر الجمهور"), Tx("آخر مورد"), Tx("تاريخ آخر شراء"), N("خصم آخر مرة %"), N("سعر الصيدلي آخر مرة")],
+    { name: "النواقص", columns: [Tx("الصنف"), Tx("السبب"), Tx("الرصيد"), Tx("حد الطلب"), Tx("المبيع في 60 يومًا"), Tx("المقترح"), N("المقترح بالوحدة"), M("سعر الجمهور"), Tx("آخر مورد"), Tx("تاريخ آخر شراء"), { label: "خصم آخر مرة %", type: "num" }, M("سعر الصيدلي آخر مرة")],
       rows: items.map((r) => [r.name_en || r.name_ar, r.reasons.map((x) => SH_REASON[x][1].replace(/^[⚠✕] /, "")).join("، "), fmtStock(r.stock, it(r)) || "0",
-        r.min_stock ? fmtStock(r.min_stock, it(r)) : "", fmtStock(r.sold_60d, it(r)) || "0", r.suggest_base ? fmtStock(r.suggest_base, it(r)) : "", r.suggest_base || "", r.public_price != null ? r.public_price / 100 : "", r.last_supplier || "", r.last_date || "",
-        r.last_discount_bp != null ? r.last_discount_bp / 100 : "", r.last_net_price != null ? r.last_net_price / 100 : ""]) }] }));
+        r.min_stock ? fmtStock(r.min_stock, it(r)) : "", fmtStock(r.sold_60d, it(r)) || "0", r.suggest_base ? fmtStock(r.suggest_base, it(r)) : "", r.suggest_base || "", r.public_price ?? "", r.last_supplier || "", r.last_date || "",
+        r.last_discount_bp != null ? r.last_discount_bp / 100 : "", r.last_net_price ?? ""]) }] }));
 }
 
 // ------------------------------------------------------------------ customers
