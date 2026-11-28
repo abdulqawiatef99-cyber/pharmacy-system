@@ -1,4 +1,4 @@
-"""U2-0 «امنع الغلط، متنبهش عليه» (OWNER_RULES §13): an impossible or illogical money / stock entry is REFUSED
+"""U2-0 «امنع الغلط، متنبهش عليه» (OWNER_RULES): an impossible or illogical money / stock entry is REFUSED
 by the server, not warned about. One test per entry point; each must refuse."""
 from dataclasses import replace
 from datetime import timedelta

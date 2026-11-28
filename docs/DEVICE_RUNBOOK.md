@@ -2,7 +2,7 @@
 
 Prepared 2026-10-30 so that the device sessions do not spend their usage re-reading docs. Sources:
 `WINDOWS_ACCEPTANCE.md` §0 (R1–R10), the 12-step table in
-`archive/HANDOFF_2026-10-30_before_compaction.md`, and `OWNER_TEST_PLAN.md` P1–P2.
+`OWNER_TEST_PLAN.md` P1–P2.
 Installer: run 72, artifact `PharmacySetup`, sha256 `913ad6027c81d7a32274f4026f82165f28b1c57757adaafbedc7509d722d5dd5`.
 R8 candidate: `b632981`. It is identical to `c9906a9` except that `app/version.py` says rc2 (verified).
 CLI commands: `backup`, `restore`, `verify`, `preflight`, `update`, `selftest`, `init`, `serve`.

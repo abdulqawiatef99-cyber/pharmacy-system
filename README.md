@@ -2,7 +2,7 @@
 
 منصة لإدارة الصيدلية. اللي جاهز دلوقتي: فواتير الشراء، والمخزون بالتشغيلات، ونقل البيانات من البرامج التانية، والجرد، واقتراح الطلبية، وتنبيهات سحب هيئة الدواء، والكاشير، والبنية التحتية للسلامة الدوائية.
 
-**ابدأ بـ [`AGENTS.md`](AGENTS.md) ثم [`docs/STATUS.md`](docs/STATUS.md).** الرؤية والمبادئ في [`docs/PROJECT.md`](docs/PROJECT.md).
+**القواعد كلها في [`docs/OWNER_RULES.md`](docs/OWNER_RULES.md) بس**، وقواعد الكود في [`AGENTS.md`](AGENTS.md)، والحالة في [`docs/STATUS.md`](docs/STATUS.md). الرؤية والمبادئ في [`docs/PROJECT.md`](docs/PROJECT.md).
 
 ## التشغيل على جهاز الصيدلية (Windows أو Linux)
 على Windows: شغّل `scripts\windows\install.bat` مرة واحدة، وبعد كده `start.bat`.
@@ -33,13 +33,13 @@ python -m unittest discover -s tests -t .
 ## الوثائق
 | الملف | المحتوى |
 |---|---|
-| `AGENTS.md` | قواعد العمل لكل أدوات التطوير (ابدأ منها) |
+| `docs/OWNER_RULES.md` | كل القواعد (المصدر الوحيد) |
+| `AGENTS.md` | قواعد الكود التقنية |
 | `docs/STATUS.md` | الحالة ونسبة جاهزية النسخة الأولى |
 | `docs/HANDOFF.md` | العمل الجاري والخطوة الجاية |
 | `docs/PROJECT.md` | الرؤية والمبادئ والمعمارية |
 | `docs/ARCHITECTURE.md` | المعمارية، قاعدة البيانات، الأجهزة الطرفية، التكاملات |
 | `docs/DECISIONS.md` | القرارات التقنية وأسبابها (ADR) |
-| `docs/ROADMAP.md` | ترتيب المراحل ومعايير القبول |
 | `docs/PROGRESS.md` | سجل تاريخي (حتى 2026-10-25) |
 | `docs/SECURITY.md` | الأمان، وإيه اللي اتنفذ، وإيه الناقص |
 | `docs/API.md` | واجهات API (لتطبيق الموبايل والتكاملات) |

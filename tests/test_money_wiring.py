@@ -223,7 +223,7 @@ class TestCodexReview348c(WiringCase):
         a = self.sell(self.pan, payments=[{"method": "cash", "amount": 2000},
                                           {"method": "card", "amount": 2000, "channel_id": self.card_ch}], units=2)
         d = a if "lines" in a else a["sale"]
-        # U2-0 (OWNER_RULES §13): only the card part goes back to the card; the whole 40.00 is refused
+        # U2-0 (OWNER_RULES): only the card part goes back to the card; the whole 40.00 is refused
         r = self.call("POST", f"/api/sales/{d['id']}/return", 409, json={"lines": {d["lines"][0]["id"]: 2},
                                                                     "refund_method": "card", "reason": "العميل رجّعه"})
         self.assertEqual(r["error"]["code"], "refund_exceeds_method")
@@ -244,7 +244,7 @@ class TestLaunchGateCodex381(WiringCase):
 
     def test_a_cash_sale_refunded_to_the_card_debits_the_card_account(self):
         sid, line = self.sale_id(self.sell(self.pan, units=2))                      # 40.00 cash
-        # U2-0 (OWNER_RULES §13): money that came in cash never goes back to a card
+        # U2-0 (OWNER_RULES): money that came in cash never goes back to a card
         r = self.call("POST", f"/api/sales/{sid}/return", 409, json={"lines": {line: 1}, "refund_method": "card",
                                                                  "reason": "العميل رجّعه"})
         self.assertEqual(r["error"]["code"], "refund_exceeds_method")

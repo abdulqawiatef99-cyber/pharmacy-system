@@ -20,7 +20,7 @@ Order: test 3 first (its update also brings the latest `develop` for tests 1 and
 Stop rule: a step that does not give the expected result → photo/screenshot, stop that test, post on #18, go to the next test.
 
 **Before (Claude, 5 min):** `hostname` = `DESKTOP-5JVH3QD` (else stop) · `visit.pre()` (backup + snapshot) and post `r.md` on #18 ·
-`CI / linux` on the `develop` head is green (OWNER_RULES §4; if CI is still blocked by GitHub billing, the day chat decides,
+`CI / linux` on the `develop` head is green (OWNER_RULES; if CI is still blocked by GitHub billing, the day chat decides,
 and says so on #18) · note which of #240 (#98 warning) and #241 (#206 clock) are merged: only merged PRs reach the PC.
 
 ### Test 3 — update and rollback (gate G6), 15 min

@@ -94,7 +94,7 @@ class TestLineFixed(FixedCase):
         sid, d = self.draft()
         gid = next(l for l in d["lines"] if l["item_id"] == self.cheap)["id"]
         gross = next(l for l in d["lines"] if l["id"] == gid)["gross"]
-        from app.core.errors import ValidationFailed           # U2-0 (OWNER_RULES §13): refused, no longer clamped
+        from app.core.errors import ValidationFailed           # U2-0 (OWNER_RULES): refused, no longer clamped
         with self.assertRaises(ValidationFailed) as e:
             self.s.update_line(self.ctx, sid, gid, discount_amount=99999)
         self.assertEqual(e.exception.code, "discount_exceeds_value")

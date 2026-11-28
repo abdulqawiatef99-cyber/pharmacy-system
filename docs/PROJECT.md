@@ -1,11 +1,9 @@
 # منصة إدارة الصيدليات — الوثيقة المركزية
 
-> **ابدأ من هنا.** دي الوثيقة اللي أي أداة تطوير (Claude أو ChatGPT أو مبرمج) لازم تقراها قبل ما تلمس الكود.
-> بتلخص الرؤية والحالة والقرارات وخطوة الشغل الجاية. أي مرحلة تخلص لازم الوثيقة دي تتحدث معاها.
+> وصف المشروع ورؤيته (تاريخي). **القواعد كلها في `docs/OWNER_RULES.md` بس**، وقواعد الكود التقنية في `AGENTS.md`.
 >
 > آخر تحديث: 2026-10-24
-> **المستودع:** github.com/abdulqawiatef99-cyber/pharmacy-system (Private). قواعد العمل لكل الأدوات في `AGENTS.md`،
-> والحالة الحالية ونسبة الإنجاز في `docs/STATUS.md`، والعمل الجاري في `docs/HANDOFF.md`. أقسام 4 و6 و7 و8 تحت تاريخية.
+> **المستودع:** github.com/abdulqawiatef99-cyber/pharmacy-system (Private). الحالة الحالية ونسبة الإنجاز في `docs/STATUS.md`، والعمل الجاري في `docs/HANDOFF.md`. أقسام 4 و6 و7 و8 تحت تاريخية.
 
 ## 1. الرؤية في سطرين
 منصة واحدة لإدارة الصيدلية: مشتريات، مخزون، مبيعات، سلامة دوائية، وتحليلات. البداية صيدلية واحدة (صاحب المشروع)،
@@ -95,7 +93,7 @@ manage.py      أوامر التشغيل والإدارة
 3. **بعدها:** الإضافة F8 (الأدوية الشهرية) لو وافقت عليها، أو مرحلة 3a (ربط الأصناف بالمواد الفعالة) بعد ما تختار الطريقة.
 
 ## الوثائق
-`ARCHITECTURE.md` · `DECISIONS.md` · `ROADMAP.md` · `PROGRESS.md` · `SECURITY.md` · `API.md` · `CLINICAL_DATA_SOURCES.md` · `DATABASE_EVALUATION.md` · `COSTS.md` · `WINDOWS_ACCEPTANCE.md` · `GITHUB.md` · `FUTURE_REQUIREMENTS.md` · `specs/`
+`ARCHITECTURE.md` · `DECISIONS.md` · `PROGRESS.md` · `SECURITY.md` · `API.md` · `CLINICAL_DATA_SOURCES.md` · `DATABASE_EVALUATION.md` · `COSTS.md` · `WINDOWS_ACCEPTANCE.md` · `GITHUB.md` · `FUTURE_REQUIREMENTS.md` · `specs/`
 
 ## 9. إزاي تضيف أداة جديدة (إلزامي)
 لكل فكرة جديدة: (1) المشكلة اللي بتحلها (2) الوحدة المناسبة ليها (3) البيانات اللي داخلة وطالعة

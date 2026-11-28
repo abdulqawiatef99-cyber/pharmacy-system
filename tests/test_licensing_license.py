@@ -248,7 +248,7 @@ class TestDecision(unittest.TestCase):
             s = L.status(state)
             self.assertEqual(s.state, state)
             self.assertTrue(s.message)
-            self.assertIsNone(re.search(r"[A-Za-z]", s.message), s.message)        # OWNER_RULES §1
+            self.assertIsNone(re.search(r"[A-Za-z]", s.message), s.message)        # OWNER_RULES
             self.assertEqual(s.usable, state in ("valid", "grace"))
 
     def test_paid_updates_window(self):

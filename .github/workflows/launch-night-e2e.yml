@@ -3,7 +3,7 @@ name: Launch night e2e
 # #113: the two launch-night scripts (scripts/windows/launch-fresh-start.bat, estock-import.bat) touch the
 # pharmacy's real data folder, so they are run for real here on Windows, on synthetic data in a throw-away
 # profile (tests/test_launch_night_e2e_windows.py). Only when those files change and the PR has the label
-# "ci" (GitHub minutes, OWNER_RULES §4), or on demand.
+# "ci" (GitHub minutes, OWNER_RULES), or on demand.
 
 on:
   pull_request:

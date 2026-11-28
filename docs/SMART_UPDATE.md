@@ -126,7 +126,7 @@ Any failure in 2–5: nothing selected, the live DB untouched, candidate files d
   a fix forward. Automatic rollback covers "the new version does not start".
 - The signed update path keeps the deployed Python and launcher protocol.
 - `pywin32` loads DLLs from the installed set at interpreter start; a pywin32 upgrade is caught by the
-  candidate selftest (import check). No new installer is built (OWNER_RULES §3), so do not upgrade pywin32
+  candidate selftest (import check). No new installer is built (OWNER_RULES), so do not upgrade pywin32
   until the owner decides how to ship it.
 - Production releases use signed bundles. The transition retires the branch and raw ZIP paths.
   The Windows installer workflow is manual and publishes review builds only.

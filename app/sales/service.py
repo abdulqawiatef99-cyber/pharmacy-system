@@ -1052,7 +1052,7 @@ class Sales:
             if (who["name"] or "").strip() == (who["org"] or "").strip() or re.search(
                     r"(^|؛ )كود إي ستوك: 1(؛|$)", who["notes"] or ""):
                 raise ValidationFailed("ده حساب الصيدلية نفسها: اختار العميل الحقيقي", code="keep_change_house")
-            # only real change (review P1, OWNER_RULES §13): less than the cash paid and at most 50 EGP. Anything more
+            # only real change (review P1, OWNER_RULES): less than the cash paid and at most 50 EGP. Anything more
             # is an advance payment, which goes through the customer's account by the owner / a manager
             if change_to_credit > KEEP_CHANGE_MAX or change_to_credit >= paid_cash:
                 raise ValidationFailed(f"الباقي اللي يتساب رصيد لحد {egp(KEEP_CHANGE_MAX)} ج وأقل من المدفوع نقدي؛"

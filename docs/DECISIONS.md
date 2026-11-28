@@ -120,7 +120,7 @@ tables per row. Decision:
   writes refused inside it), so a long report never stops the cashier screen.
 Tests: `tests/test_report_freeze_249.py` (fail before the change).
 
-## ADR-018 Refuse the impossible: covered and pending cases (owner 21/11; moved from OWNER_RULES §13 on 26/11)
+## ADR-018 Refuse the impossible: covered and pending cases (owner 21/11; moved from OWNER_RULES on 26/11)
 Rule: `docs/OWNER_RULES.md` §8. Tests: `tests/test_u2_0_refusals.py`.
 - Covered (U2-0, 22/11): sale or quantity beyond stock; zero or negative quantity or price; discount above the
   line or invoice value; return above sold minus returned; refund to a card / wallet above what came that way
