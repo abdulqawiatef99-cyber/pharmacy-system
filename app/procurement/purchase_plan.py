@@ -30,6 +30,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
 from heapq import merge
+from math import floor
 
 from ..core import audit
 from ..core.errors import NotFound, ValidationFailed
@@ -352,11 +353,16 @@ def _archive_purchases(db: Database, ctx: Context, since: str, until: str, sups:
                         f'SELECT {a.col("Products", "product_id")} id, {a.col("Products", "sell_price")} price'
                         ' FROM "e_Products"')}
                 public = eh._dec(product_prices.get(_id(r["pid"])))
-            public = piasters(public) if public is not None and public > 0 else None
-            net = piasters(net) if net is not None and net >= 0 else None
-            # The rule works with a paid/free ratio. Express fractional packs as whole parts exactly.
-            paid = Fraction(qty) / Fraction(qty + bonus)
-            disc = real_discount_bp(public, net, paid.numerator, paid.denominator - paid.numerator, None)
+            # The discount comes from the exact prices (0.8549 against 1.0000 is 14.51%, not 15.00%). Only the
+            # prices shown next to it are rounded to the piaster, and the discount is rounded once, at the end.
+            exact_public = public if public is not None and public > 0 else None
+            exact_net = net if net is not None and net >= 0 else None
+            public = piasters(exact_public) if exact_public is not None else None
+            net = piasters(exact_net) if exact_net is not None else None
+            disc = None
+            if public and exact_net is not None:  # a list price under half a piaster has no discount, as before
+                ratio = Fraction(exact_net) * Fraction(qty) / (Fraction(exact_public) * Fraction(qty + bonus))
+                disc = 10000 - floor(ratio * 10000 + Fraction(1, 2))  # half up, same rule as real_discount_bp
             vid = _id(r["vid"])
             sid = suppliers.get(vid)
             sup = sups.get(sid)

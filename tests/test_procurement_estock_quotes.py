@@ -73,6 +73,29 @@ class TestArchiveQuotes(PlanBase):
         self.assertEqual(out["ask_about"], [])
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_discount_is_computed_from_exact_prices_not_piaster_rounded(self):
+        """Codex review on #509: 0.8549 and 0.8510 against a list price of 1.0000 are 14.51% and 14.90%, not both
+        15.00%; rounding the prices to piasters first made the cheaper supplier look equal or worse."""
+        other = cat.create_supplier(self.db, self.ctx, name="مورد تجريبي ثاني")
+        with closing(sqlite3.connect(self.path)) as con, con:
+            con.execute("INSERT INTO map_suppliers VALUES ('85', ?)", (other,))
+        self.old_buy("1", vendor="84", price="1.0000", net="0.8549", qty="10", bonus="0")
+        self.old_buy("2", vendor="85", price="1.0000", net="0.8510", qty="10", bonus="0", days_ago=5)
+        row = self.rows()[self.it]
+        found = {r["supplier_id"]: r["discount_bp"] for r in row["suppliers"]}
+        self.assertEqual(found[self.ibn], 1451)
+        self.assertEqual(found[other], 1490)
+        self.assertEqual((row["best"]["supplier_id"], row["best"]["discount_bp"]), (other, 1490))
+
+    def test_discount_rounds_half_up_once_at_the_end(self):
+        self.old_buy("1", price="1.0000", net="0.85005", qty="10", bonus="0")  # paid 8500.5bp -> 8501
+        self.assertEqual(self.rows()[self.it]["best"]["discount_bp"], 1499)
+
+    def test_list_price_under_half_a_piaster_has_no_discount(self):
+        self.old_buy("1", price="0.004", net="0.003", qty="10", bonus="0")
+        row = self.rows()[self.it]
+        self.assertTrue(all(s["discount_bp"] is None for s in row["suppliers"]))
+
     def test_invoice_day_latest_across_sources_and_live_wins_a_tie(self):
         self.old_buy("1", days_ago=7, entered_days_ago=1, net="70")
         self.old_buy("2", days_ago=4, entered_days_ago=3, net="85")
